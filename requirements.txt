@@ -1,6 +1,7 @@
-python-telegram-bot
+pyTelegramBotAPI
 ccxt
-requests
 psycopg2-binary
 pandas
 numpy
+requests
+
