@@ -263,4 +263,3 @@ def keskin_nisanci_goreve():
 
 if __name__ == "__main__":
     keskin_nisanci_goreve()
-        
