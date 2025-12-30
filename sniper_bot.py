@@ -3,6 +3,7 @@ import time
 import telebot
 import os
 import pandas as pd
+import requests # YENİ SİLAHIMIZ
 from datetime import datetime
 
 # --- AYARLAR ---
@@ -29,40 +30,44 @@ def get_analysis_data(symbol):
     try:
         clean_symbol = symbol.replace('/', '')
         
-        # --- 1. FUTURES İSTİHBARATI (DÜZELTİLDİ: SNAKE_CASE KULLANILDI) ---
-        # Önce "Top Trader" (Balina) verisini deniyoruz. Bu daha kalitelidir.
+        # --- 1. FUTURES İSTİHBARATI (MANUEL HTTP İSTEĞİ) ---
+        # CCXT kütüphanesiyle uğraşmıyoruz, direkt adrese gidiyoruz.
+        # Bu yöntem asla "AttributeError" vermez.
+        
+        url = "https://fapi.binance.com/fapi/data/globalLongShortAccountRatio"
+        params = {
+            'symbol': clean_symbol,
+            'period': '15m',
+            'limit': 1
+        }
+        
         try:
-            ls_data = exchange_futures.fapiData_get_top_long_short_account_ratio({
-                'symbol': clean_symbol, 
-                'period': '15m', 
-                'limit': 1
-            })
-        except:
-            # Eğer Top Trader yoksa Global veriyi dene (Yedek Plan)
-            try:
-                ls_data = exchange_futures.fapiData_get_global_long_short_account_ratio({
-                    'symbol': clean_symbol, 
-                    'period': '15m', 
-                    'limit': 1
-                })
-            except Exception as e:
-                # İkisi de olmazsa bu coin Vadeli'de yoktur veya veri vermiyordur.
-                # print(f"⚠️ {clean_symbol} Futures verisi alınamadı: {e}")
-                return None
-
-        if not ls_data: return None
+            response = requests.get(url, params=params, timeout=5)
+            data_json = response.json()
             
-        long_pct = float(ls_data[0]['longAccount']) * 100
-        short_pct = float(ls_data[0]['shortAccount']) * 100
-        ls_ratio = float(ls_data[0]['longShortRatio'])
-        
-        # Open Interest
-        oi_data = exchange_futures.fetch_open_interest(clean_symbol)
-        open_interest = float(oi_data['openInterestAmount'])
-        
-        # Funding Rate
-        funding = exchange_futures.fetch_funding_rate(clean_symbol)
-        funding_rate = funding['fundingRate'] * 100
+            if not data_json or len(data_json) == 0:
+                # Veri boşsa pas geç
+                return None
+                
+            ls_data = data_json[0]
+            
+            long_pct = float(ls_data['longAccount']) * 100
+            short_pct = float(ls_data['shortAccount']) * 100
+            ls_ratio = float(ls_data['longShortRatio'])
+            
+        except Exception as req_err:
+            # İnternet hatası vs olursa
+            print(f"⚠️ {symbol} HTTP Hatası: {req_err}")
+            return None
+
+        # Open Interest (Bunu CCXT ile çekmeye devam edebiliriz, standarttır)
+        try:
+            oi_data = exchange_futures.fetch_open_interest(clean_symbol)
+            open_interest = float(oi_data['openInterestAmount'])
+            funding = exchange_futures.fetch_funding_rate(clean_symbol)
+            funding_rate = funding['fundingRate'] * 100
+        except:
+            return None # Standart veriler bile yoksa çık
 
         # --- 2. SPOT İSTİHBARATI ---
         bars = exchange_spot.fetch_ohlcv(symbol, timeframe='15m', limit=50)
@@ -89,12 +94,12 @@ def get_analysis_data(symbol):
             'price': df['close'].iloc[-1]
         }
     except Exception as e:
-        print(f"❌ HATA ({symbol}): {e}")
+        print(f"❌ GENEL HATA ({symbol}): {e}")
         return None
 
 # --- KOMUTANIN GÖZÜ (ANA OPERASYON) ---
 def general_tarama():
-    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v13.3 (KESİN ÇÖZÜM) Devrede!\n🚀 Hedef: Balinalar (Top Traders)\n🔧 Düzeltme: Snake_Case Syntax")
+    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v13.4 (MANUEL MOD) Devrede!\n🚀 Yöntem: Direct HTTP Requests\n🎯 Hedef: Hatasız İstihbarat")
     
     while True:
         print("🔄 Tüm Cepheler Taranıyor...")
@@ -107,6 +112,9 @@ def general_tarama():
             print(f"🎯 Hedef Listesi ({len(hedef_liste)} Coin) Taranıyor...")
             
             for symbol in hedef_liste:
+                # API limitine takılmamak için manuel isteklerde biraz daha yavaşla
+                time.sleep(0.5) 
+                
                 data = get_analysis_data(symbol)
                 if not data: continue
                 
@@ -116,17 +124,17 @@ def general_tarama():
                 ICON = ""
                 YORUM = ""
                 
-                # 1. BALİNA YIĞILMASI (%60 Kuralı)
+                # 1. BALİNA YIĞILMASI
                 if data['long_pct'] > 60:
                     RAPOR_VAR = True
-                    SEBEP = f"BALİNA LONGLARI (%{data['long_pct']:.1f})"
+                    SEBEP = f"LONGLAR YIĞILDI (%{data['long_pct']:.1f})"
                     ICON = "⚠️"
-                    YORUM = "Balinalar Long açmış. Kasa terse vurabilir (Tuzak)!"
+                    YORUM = "Kasa Longları patlatmak isteyebilir (Düşüş Tuzağı)!"
                 elif data['short_pct'] > 60:
                     RAPOR_VAR = True
-                    SEBEP = f"BALİNA SHORTLARI (%{data['short_pct']:.1f})"
+                    SEBEP = f"SHORTLAR YIĞILDI (%{data['short_pct']:.1f})"
                     ICON = "🚀"
-                    YORUM = "Balinalar Short açmış. Kasa yukarı sürebilir (Squeeze)!"
+                    YORUM = "Kasa Shortları patlatmak isteyebilir (Squeeze/Yükseliş)!"
                 
                 # 2. OPEN INTEREST PATLAMASI
                 clean_sym = symbol.replace('/','')
@@ -152,7 +160,7 @@ def general_tarama():
                         f"🐋 **GENELKURMAY İSTİHBARATI** {ICON}\n"
                         f"🚨 **ALARM:** {SEBEP}\n\n"
                         f"💎 **{symbol}** ({data['price']} $)\n"
-                        f"📊 **Futures (Balina) Dengesi:**\n"
+                        f"📊 **Futures Dengesi:**\n"
                         f"   • Long: %{data['long_pct']:.1f} 🟢\n"
                         f"   • Short: %{data['short_pct']:.1f} 🔴\n"
                         f"   • Fonlama: %{data['funding']:.4f}\n"
@@ -173,4 +181,3 @@ def general_tarama():
 
 if __name__ == "__main__":
     general_tarama()
-    
