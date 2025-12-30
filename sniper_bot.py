@@ -8,42 +8,32 @@ from datetime import datetime
 # --- AYARLAR ---
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-
-# API ANAHTARLARINI HEROKU'DAN ÇEK
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_SECRET_KEY')
 
 # BAĞLANTILAR
 exchange_spot = ccxt.binance({
-    'apiKey': API_KEY,
-    'secret': API_SECRET,
-    'options': {'defaultType': 'spot'},
-    'enableRateLimit': True
+    'apiKey': API_KEY, 'secret': API_SECRET,
+    'options': {'defaultType': 'spot'}, 'enableRateLimit': True
 })
-
 exchange_futures = ccxt.binance({
-    'apiKey': API_KEY,
-    'secret': API_SECRET,
-    'options': {'defaultType': 'future'},
-    'enableRateLimit': True
+    'apiKey': API_KEY, 'secret': API_SECRET,
+    'options': {'defaultType': 'future'}, 'enableRateLimit': True
 })
 
 bot = telebot.TeleBot(BOT_TOKEN)
 OI_HAFIZA = {} 
 
-def get_analysis_data(symbol):
+def get_analysis_data(symbol, is_top_40):
     try:
         clean_symbol = symbol.replace('/', '')
         
-        # --- 1. SPOT İSTİHBARATI (TEMEL) ---
+        # 1. SPOT İSTİHBARATI (HERKESE YAPILIR)
         try:
             bars = exchange_spot.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-        except:
-            return None 
+        except: return None 
 
         df = pd.DataFrame(bars, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-        
-        # Teknik Analiz
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -54,123 +44,94 @@ def get_analysis_data(symbol):
         vol_ratio = df['v'].iloc[-1] / vol_avg if vol_avg > 0 else 0
         current_price = df['close'].iloc[-1]
 
-        # --- 2. FUTURES İSTİHBARATI (VARSA) ---
-        long_pct = 0
-        short_pct = 0
-        open_interest = 0
-        funding_rate = 0
-        has_futures = False
+        # 2. FUTURES İSTİHBARATI (SADECE İLK 40 COIN İÇİN)
+        long_pct = 0; short_pct = 0; open_interest = 0; funding_rate = 0; has_futures = False
 
-        try:
-            # Futures verisi çekmeyi dene
-            ls_data = exchange_futures.fapiDataGetTopLongShortAccountRatio({
-                'symbol': clean_symbol,
-                'period': '15m',
-                'limit': 1
-            })
-            
-            if ls_data:
-                item = ls_data[0] if isinstance(ls_data, list) else ls_data
-                long_pct = float(item['longAccount']) * 100
-                short_pct = float(item['shortAccount']) * 100
-                
-                # OI ve Funding
-                oi_data = exchange_futures.fetch_open_interest(clean_symbol)
-                open_interest = float(oi_data['openInterestAmount'])
-                funding = exchange_futures.fetch_funding_rate(clean_symbol)
-                funding_rate = funding['fundingRate'] * 100
-                has_futures = True
-        except:
-            has_futures = False
-
+        # EĞER COIN İLK 40'TAYSA VE API IZNIMIZ VARSA BAK
+        if is_top_40:
+            try:
+                ls_data = exchange_futures.fapiDataGetTopLongShortAccountRatio({
+                    'symbol': clean_symbol, 'period': '15m', 'limit': 1
+                })
+                if ls_data:
+                    item = ls_data[0] if isinstance(ls_data, list) else ls_data
+                    long_pct = float(item['longAccount']) * 100
+                    short_pct = float(item['shortAccount']) * 100
+                    
+                    oi_data = exchange_futures.fetch_open_interest(clean_symbol)
+                    open_interest = float(oi_data['openInterestAmount'])
+                    funding = exchange_futures.fetch_funding_rate(clean_symbol)
+                    funding_rate = funding['fundingRate'] * 100
+                    has_futures = True
+            except:
+                has_futures = False
+        
         return {
-            'symbol': symbol,
-            'price': current_price,
-            'rsi': rsi.iloc[-1],
-            'vol_ratio': vol_ratio,
+            'symbol': symbol, 'price': current_price,
+            'rsi': rsi.iloc[-1], 'vol_ratio': vol_ratio,
             'has_futures': has_futures,
-            'long_pct': long_pct,
-            'short_pct': short_pct,
-            'open_interest': open_interest,
-            'funding': funding_rate
+            'long_pct': long_pct, 'short_pct': short_pct,
+            'open_interest': open_interest, 'funding': funding_rate
         }
-    except Exception as e:
-        return None
+    except: return None
 
 def general_tarama():
-    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v16 (TAM SAHA PRES) Devrede!\n🌍 Kapsam: TÜM USDT Pariteleri\n🛡️ Filtre: Bull/Bear/Stable Yok\n🚀 Hedef: Okyanusun Tamamı")
+    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v17 (HİBRİT MOD) Devrede!\n🌊 Spot: TÜMÜ (500+ Coin)\n✈️ Futures: Sadece TOP 40\n🚀 Hız ve Kapsam Optimize Edildi.")
     
-    # KESKİN FİLTRE LİSTESİ
-    YASAKLI_KELIMELER = [
-        'UP/', 'DOWN/',       # Kaldıraçlı Tokenlar
-        'BEAR', 'BULL',       # Eski tip ETF'ler
-        'USDC', 'TUSD',       # Stabil Coinler
-        'USDP', 'FDUSD', 
-        'EUR', 'DAI', 'PAXG',
-        'BUSD', 'USDE', 'USDD' 
-    ]
+    YASAKLI = ['UP/', 'DOWN/', 'BEAR', 'BULL', 'USDC', 'TUSD', 'USDP', 'FDUSD', 'EUR', 'DAI', 'PAXG', 'BUSD', 'USDE', 'USDD']
 
     while True:
-        print("🔄 Tüm Piyasa Taranıyor (Full Scan)...")
+        print("🔄 Hibrit Tarama Başlıyor...")
         try:
             tickers = exchange_spot.fetch_tickers()
+            sorted_tickers = sorted(tickers.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
             
-            # --- FİLTRELEME MOTORU ---
             hedef_liste = []
-            for symbol in tickers:
-                # 1. Sadece USDT paritesi olsun
-                if not symbol.endswith('/USDT'):
-                    continue
-                
-                # 2. Yasaklı kelimeler geçmesin
-                if any(yasak in symbol for yasak in YASAKLI_KELIMELER):
-                    continue
-                
-                hedef_liste.append(symbol)
+            for t in sorted_tickers:
+                if t[0].endswith('/USDT') and not any(x in t[0] for x in YASAKLI):
+                    hedef_liste.append(t[0])
             
-            print(f"🎯 Hedef: {len(hedef_liste)} Adet Coin Taranıyor...")
+            print(f"🎯 Toplam Hedef: {len(hedef_liste)} Coin")
             
-            # Tüm listeyi tara
-            for symbol in hedef_liste:
-                # Listemiz çok kalabalık (300+ coin), ban yememek için nazik olalım
-                time.sleep(0.15) 
+            # DÖNGÜ BAŞLIYOR
+            for i, symbol in enumerate(hedef_liste):
+                # İLK 40 COIN Mİ? (Sıfırdan başladığı için index < 40)
+                is_top_40 = (i < 40)
                 
-                data = get_analysis_data(symbol)
+                # Top 40 ise biraz yavaşla (API isteği çok), değilse hızla geç
+                if is_top_40: time.sleep(0.2)
+                else: time.sleep(0.1)
+                
+                data = get_analysis_data(symbol, is_top_40)
                 if not data: continue
                 
-                RAPOR_VAR = False
-                SEBEP = ""
-                ICON = ""
-                YORUM = ""
+                RAPOR_VAR = False; SEBEP = ""; ICON = ""; YORUM = ""
                 
-                # --- SİNYAL ANALİZİ ---
+                # --- SİNYALLER ---
                 
-                # A) SPOT SİNYALLERİ (ÖNCELİKLİ)
-                if data['vol_ratio'] > 5.0: # Hacim 5 katına çıkmışsa (Çok güçlü sinyal)
+                # A) SPOT SİNYALLERİ (HERKES İÇİN)
+                if data['vol_ratio'] > 5.0:
                     RAPOR_VAR = True
                     SEBEP = f"SPOT HACİM PATLAMASI ({data['vol_ratio']:.1f}x)"
                     ICON = "🌊"
-                    YORUM = "Devasa hacim girişi var! Dikkat!"
-                
-                elif data['rsi'] < 20: # Aşırı Satım (Dip)
+                    YORUM = "Devasa hacim girişi var!"
+                elif data['rsi'] < 20:
                     RAPOR_VAR = True
                     SEBEP = f"AŞIRI DİP (RSI: {data['rsi']:.1f})"
                     ICON = "💎"
-                    YORUM = "Fiyat çok ucuzladı, tepki gelebilir."
+                    YORUM = "Fiyat çok ucuzladı."
 
-                # B) FUTURES SİNYALLERİ (Varsa)
+                # B) FUTURES SİNYALLERİ (SADECE TOP 40)
                 if data['has_futures']:
-                    if data['long_pct'] > 65: 
+                    if data['long_pct'] > 60: 
                         RAPOR_VAR = True
-                        if not SEBEP: SEBEP = f"LONG YIĞILMASI (%{data['long_pct']:.1f})"
-                        else: YORUM += "\n⚠️ Futures tarafında Long tuzağı riski!"
-                    
-                    elif data['short_pct'] > 65:
+                        if not SEBEP: SEBEP = f"BALİNA LONGLARI (%{data['long_pct']:.1f})"
+                        else: YORUM += "\n⚠️ Futures tarafında Long yığılması (Tuzak Riski)."
+                    elif data['short_pct'] > 60:
                         RAPOR_VAR = True
-                        if not SEBEP: SEBEP = f"SHORT YIĞILMASI (%{data['short_pct']:.1f})"
-                        else: YORUM += "\n🚀 Futures tarafında Short Squeeze yakıtı!"
+                        if not SEBEP: SEBEP = f"BALİNA SHORTLARI (%{data['short_pct']:.1f})"
+                        else: YORUM += "\n🚀 Futures tarafında Short yığılması (Squeeze Fırsatı)."
 
-                    # OI Kontrolü
                     clean_sym = symbol.replace('/','')
                     prev_oi = OI_HAFIZA.get(clean_sym, data['open_interest'])
                     if clean_sym not in OI_HAFIZA: oi_degisim = 0
@@ -179,40 +140,25 @@ def general_tarama():
                     
                     if abs(oi_degisim) > 5.0:
                         RAPOR_VAR = True
-                        if not SEBEP: 
-                            SEBEP = f"OI PATLAMASI (%{oi_degisim:.1f})"
-                            ICON = "🐳"
+                        if not SEBEP: SEBEP = f"OI PATLAMASI (%{oi_degisim:.1f})"
+                        ICON = "🐳"
 
-                # --- RAPORLAMA ---
                 if RAPOR_VAR:
-                    mesaj = (
-                        f"🐋 **GENELKURMAY RAPORU** {ICON}\n"
-                        f"🚨 **ALARM:** {SEBEP}\n\n"
-                        f"💎 **{symbol}** ({data['price']} $)\n"
-                    )
-                    
+                    mesaj = (f"🐋 **GENELKURMAY RAPORU** {ICON}\n🚨 **ALARM:** {SEBEP}\n\n💎 **{symbol}** ({data['price']} $)\n")
                     if data['has_futures']:
-                        mesaj += (
-                            f"📊 **Futures:** L:%{data['long_pct']:.0f} S:%{data['short_pct']:.0f} | OI Artış: %{oi_degisim:.1f}\n"
-                            f"💰 **Fonlama:** %{data['funding']:.4f}\n"
-                        )
-                    else:
-                        mesaj += f"🚫 **Futures:** Yok (Sadece Spot)\n"
-                        
-                    mesaj += (
-                        f"🌊 **Spot:** RSI {data['rsi']:.1f} | Hacim {data['vol_ratio']:.1f}x\n\n"
-                        f"🧠 **YORUM:** {YORUM}"
-                    )
+                        mesaj += (f"📊 **Futures (Top 40):** L:%{data['long_pct']:.0f} S:%{data['short_pct']:.0f}\n💰 **Fonlama:** %{data['funding']:.4f}\n")
+                    mesaj += (f"🌊 **Spot:** RSI {data['rsi']:.1f} | Hacim {data['vol_ratio']:.1f}x\n🧠 **YORUM:** {YORUM}")
                     
                     bot.send_message(CHAT_ID, mesaj, parse_mode='Markdown')
-                    time.sleep(1) 
+                    time.sleep(1)
 
-            print("💤 Tüm Liste Tarandı. Dinleniyor...")
+            print("💤 Tur Bitti. Mola...")
             time.sleep(120)
 
         except Exception as e:
-            print(f"Döngü Hatası: {e}")
+            print(f"Hata: {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
     general_tarama()
+                                                                    
