@@ -19,20 +19,22 @@ bot = telebot.TeleBot(BOT_TOKEN)
 OI_HAFIZA = {} 
 
 # --- YARDIMCI ANALİZ MOTORLARI ---
+# --- YARDIMCI ANALİZ MOTORLARI (DÜZELTİLMİŞ) ---
 def get_analysis_data(symbol):
     try:
         # Sembol Temizliği (Örn: BTC/USDT -> BTCUSDT)
         clean_symbol = symbol.replace('/', '')
         
         # 1. FUTURES İSTİHBARATI
-        # Hata yakalamak için print ekliyoruz
-        # print(f"🔍 {clean_symbol} verisi çekiliyor...") 
+        # DÜZELTME BURADA: _global_longshort... YERİNE _globallongshort... (Bitişik yazıldı)
+        ls_data = exchange_futures.fapiPublic_get_globallongshortaccountratio({
+            'symbol': clean_symbol, 
+            'period': '15m', 
+            'limit': 1
+        })
         
-        ls_data = exchange_futures.fapiPublic_get_global_longshortaccountratio({'symbol': clean_symbol, 'period': '15m', 'limit': 1})
-        
-        # Veri boş gelirse patlamasın
         if not ls_data:
-            print(f"⚠️ {clean_symbol} için L/S verisi BOŞ geldi!")
+            print(f"⚠️ {clean_symbol} verisi boş döndü.")
             return None
             
         long_pct = float(ls_data[0]['longAccount']) * 100
@@ -72,9 +74,9 @@ def get_analysis_data(symbol):
             'price': df['close'].iloc[-1]
         }
     except Exception as e:
-        # İŞTE BURASI! Hatanın ne olduğunu artık loglarda göreceğiz.
         print(f"❌ HATA ({symbol}): {e}")
         return None
+
 
 # --- KOMUTANIN GÖZÜ (ANA OPERASYON) ---
 def general_tarama():
