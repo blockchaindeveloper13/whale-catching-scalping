@@ -13,7 +13,7 @@ CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_SECRET_KEY')
 
-# BAĞLANTILAR (ARTIK ŞİFRELİ VE YETKİLİ)
+# BAĞLANTILAR
 exchange_spot = ccxt.binance({
     'apiKey': API_KEY,
     'secret': API_SECRET,
@@ -35,65 +35,15 @@ def get_analysis_data(symbol):
     try:
         clean_symbol = symbol.replace('/', '')
         
-        # --- 1. FUTURES İSTİHBARATI (ARTIK RESMİ YOLLA) ---
-        # Anahtar olduğu için artık 'Public' değil 'Private' kapıdan da girebiliriz
-        # Ama veri public olduğu için CCXT bunu yetkili şekilde çekecektir.
-        
-        # YÖNTEM A: Top Trader Ratio (En Değerlisi)
+        # --- 1. SPOT İSTİHBARATI (TEMEL) ---
         try:
-            ls_data = exchange_futures.fetch_global_long_short_account_ratio(clean_symbol, '15m', 1)
-            # Not: CCXT sürümüne göre metod ismi değişebilir, o yüzden 
-            # aşağıda 'implicit' (doğrudan) metodları deneyeceğiz.
+            bars = exchange_spot.fetch_ohlcv(symbol, timeframe='15m', limit=50)
         except:
-            ls_data = None
+            return None 
 
-        # YÖNTEM B: Implicit API Metodu (Daha Garanti)
-        if not ls_data:
-            try:
-                # API Key olduğu için artık request başlıklarını CCXT hazırlar
-                # topLongShortAccountRatio endpoint'i
-                ls_data = exchange_futures.fapiDataGetTopLongShortAccountRatio({
-                    'symbol': clean_symbol,
-                    'period': '15m',
-                    'limit': 1
-                })
-            except:
-                try:
-                    # Yedeğin yedeği: Global Ratio
-                    ls_data = exchange_futures.fapiDataGetGlobalLongShortAccountRatio({
-                        'symbol': clean_symbol,
-                        'period': '15m',
-                        'limit': 1
-                    })
-                except Exception as e:
-                    # print(f"⚠️ {symbol} Veri Yok: {e}") 
-                    return None
-
-        if not ls_data: return None
-        
-        # Gelen veri liste mi tek obje mi kontrolü
-        if isinstance(ls_data, list):
-            data_item = ls_data[0]
-        else:
-            data_item = ls_data
-
-        long_pct = float(data_item['longAccount']) * 100
-        short_pct = float(data_item['shortAccount']) * 100
-        
-        # Open Interest
-        try:
-            oi_data = exchange_futures.fetch_open_interest(clean_symbol)
-            open_interest = float(oi_data['openInterestAmount'])
-            funding = exchange_futures.fetch_funding_rate(clean_symbol)
-            funding_rate = funding['fundingRate'] * 100
-        except:
-            open_interest = 0
-            funding_rate = 0
-
-        # --- 2. SPOT İSTİHBARATI ---
-        bars = exchange_spot.fetch_ohlcv(symbol, timeframe='15m', limit=50)
         df = pd.DataFrame(bars, columns=['t', 'o', 'h', 'l', 'c', 'v'])
         
+        # Teknik Analiz
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -102,42 +52,88 @@ def get_analysis_data(symbol):
         
         vol_avg = df['v'].mean()
         vol_ratio = df['v'].iloc[-1] / vol_avg if vol_avg > 0 else 0
+        current_price = df['close'].iloc[-1]
+
+        # --- 2. FUTURES İSTİHBARATI (VARSA) ---
+        long_pct = 0
+        short_pct = 0
+        open_interest = 0
+        funding_rate = 0
+        has_futures = False
+
+        try:
+            # Futures verisi çekmeyi dene
+            ls_data = exchange_futures.fapiDataGetTopLongShortAccountRatio({
+                'symbol': clean_symbol,
+                'period': '15m',
+                'limit': 1
+            })
+            
+            if ls_data:
+                item = ls_data[0] if isinstance(ls_data, list) else ls_data
+                long_pct = float(item['longAccount']) * 100
+                short_pct = float(item['shortAccount']) * 100
+                
+                # OI ve Funding
+                oi_data = exchange_futures.fetch_open_interest(clean_symbol)
+                open_interest = float(oi_data['openInterestAmount'])
+                funding = exchange_futures.fetch_funding_rate(clean_symbol)
+                funding_rate = funding['fundingRate'] * 100
+                has_futures = True
+        except:
+            has_futures = False
 
         return {
+            'symbol': symbol,
+            'price': current_price,
+            'rsi': rsi.iloc[-1],
+            'vol_ratio': vol_ratio,
+            'has_futures': has_futures,
             'long_pct': long_pct,
             'short_pct': short_pct,
             'open_interest': open_interest,
-            'funding': funding_rate,
-            'rsi': rsi.iloc[-1],
-            'vol_ratio': vol_ratio,
-            'price': df['close'].iloc[-1]
+            'funding': funding_rate
         }
     except Exception as e:
-        # print(f"❌ HATA ({symbol}): {e}")
         return None
 
 def general_tarama():
-    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v14 (RESMİ API MODU) Devrede!\n🔑 Kimlik: Onaylı\n🎯 Hedef: Balinalar")
+    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v16 (TAM SAHA PRES) Devrede!\n🌍 Kapsam: TÜM USDT Pariteleri\n🛡️ Filtre: Bull/Bear/Stable Yok\n🚀 Hedef: Okyanusun Tamamı")
     
-    YASAKLI_KELIMELER = ['UP/', 'DOWN/', 'BEAR', 'BULL', 'DAI', 'TUSD', 'USDC', 'USDP', 'FDUSD', 'EUR', 'PAXG']
+    # KESKİN FİLTRE LİSTESİ
+    YASAKLI_KELIMELER = [
+        'UP/', 'DOWN/',       # Kaldıraçlı Tokenlar
+        'BEAR', 'BULL',       # Eski tip ETF'ler
+        'USDC', 'TUSD',       # Stabil Coinler
+        'USDP', 'FDUSD', 
+        'EUR', 'DAI', 'PAXG',
+        'BUSD', 'USDE', 'USDD' 
+    ]
 
     while True:
-        print("🔄 Tarama Başlıyor (API Key Aktif)...")
+        print("🔄 Tüm Piyasa Taranıyor (Full Scan)...")
         try:
             tickers = exchange_spot.fetch_tickers()
-            sorted_tickers = sorted(tickers.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
             
-            hedef_liste = [
-                t[0] for t in sorted_tickers 
-                if '/USDT' in t[0] 
-                and not any(x in t[0] for x in YASAKLI_KELIMELER)
-            ][:40]
+            # --- FİLTRELEME MOTORU ---
+            hedef_liste = []
+            for symbol in tickers:
+                # 1. Sadece USDT paritesi olsun
+                if not symbol.endswith('/USDT'):
+                    continue
+                
+                # 2. Yasaklı kelimeler geçmesin
+                if any(yasak in symbol for yasak in YASAKLI_KELIMELER):
+                    continue
+                
+                hedef_liste.append(symbol)
             
-            print(f"🎯 Hedef: {len(hedef_liste)} Coin")
+            print(f"🎯 Hedef: {len(hedef_liste)} Adet Coin Taranıyor...")
             
+            # Tüm listeyi tara
             for symbol in hedef_liste:
-                # API Key olduğu için limitler daha geniştir ama yine de nazik olalım
-                time.sleep(0.2) 
+                # Listemiz çok kalabalık (300+ coin), ban yememek için nazik olalım
+                time.sleep(0.15) 
                 
                 data = get_analysis_data(symbol)
                 if not data: continue
@@ -147,44 +143,71 @@ def general_tarama():
                 ICON = ""
                 YORUM = ""
                 
-                # KRİTERLER
-                if data['long_pct'] > 60:
-                    RAPOR_VAR = True
-                    SEBEP = f"LONGLAR YIĞILDI (%{data['long_pct']:.1f})"
-                    ICON = "⚠️"
-                    YORUM = "Tuzak Olabilir (Long Squeeze Risk)!"
-                elif data['short_pct'] > 60:
-                    RAPOR_VAR = True
-                    SEBEP = f"SHORTLAR YIĞILDI (%{data['short_pct']:.1f})"
-                    ICON = "🚀"
-                    YORUM = "Patlama Olabilir (Short Squeeze Fırsat)!"
+                # --- SİNYAL ANALİZİ ---
                 
-                clean_sym = symbol.replace('/','')
-                prev_oi = OI_HAFIZA.get(clean_sym, data['open_interest'])
-                if clean_sym not in OI_HAFIZA: oi_degisim = 0
-                else: oi_degisim = ((data['open_interest'] - prev_oi) / prev_oi) * 100
-                OI_HAFIZA[clean_sym] = data['open_interest']
+                # A) SPOT SİNYALLERİ (ÖNCELİKLİ)
+                if data['vol_ratio'] > 5.0: # Hacim 5 katına çıkmışsa (Çok güçlü sinyal)
+                    RAPOR_VAR = True
+                    SEBEP = f"SPOT HACİM PATLAMASI ({data['vol_ratio']:.1f}x)"
+                    ICON = "🌊"
+                    YORUM = "Devasa hacim girişi var! Dikkat!"
                 
-                if abs(oi_degisim) > 3.0: 
-                    RAPOR_VAR = True 
-                    SEBEP = f"OI PATLAMASI (%{oi_degisim:.1f})"
-                    ICON = "🐳"
-                    if not YORUM: YORUM = "Para Girişi Var!"
+                elif data['rsi'] < 20: # Aşırı Satım (Dip)
+                    RAPOR_VAR = True
+                    SEBEP = f"AŞIRI DİP (RSI: {data['rsi']:.1f})"
+                    ICON = "💎"
+                    YORUM = "Fiyat çok ucuzladı, tepki gelebilir."
 
+                # B) FUTURES SİNYALLERİ (Varsa)
+                if data['has_futures']:
+                    if data['long_pct'] > 65: 
+                        RAPOR_VAR = True
+                        if not SEBEP: SEBEP = f"LONG YIĞILMASI (%{data['long_pct']:.1f})"
+                        else: YORUM += "\n⚠️ Futures tarafında Long tuzağı riski!"
+                    
+                    elif data['short_pct'] > 65:
+                        RAPOR_VAR = True
+                        if not SEBEP: SEBEP = f"SHORT YIĞILMASI (%{data['short_pct']:.1f})"
+                        else: YORUM += "\n🚀 Futures tarafında Short Squeeze yakıtı!"
+
+                    # OI Kontrolü
+                    clean_sym = symbol.replace('/','')
+                    prev_oi = OI_HAFIZA.get(clean_sym, data['open_interest'])
+                    if clean_sym not in OI_HAFIZA: oi_degisim = 0
+                    else: oi_degisim = ((data['open_interest'] - prev_oi) / prev_oi) * 100
+                    OI_HAFIZA[clean_sym] = data['open_interest']
+                    
+                    if abs(oi_degisim) > 5.0:
+                        RAPOR_VAR = True
+                        if not SEBEP: 
+                            SEBEP = f"OI PATLAMASI (%{oi_degisim:.1f})"
+                            ICON = "🐳"
+
+                # --- RAPORLAMA ---
                 if RAPOR_VAR:
                     mesaj = (
                         f"🐋 **GENELKURMAY RAPORU** {ICON}\n"
                         f"🚨 **ALARM:** {SEBEP}\n\n"
                         f"💎 **{symbol}** ({data['price']} $)\n"
-                        f"📊 **Futures:** Long %{data['long_pct']:.1f} | Short %{data['short_pct']:.1f}\n"
-                        f"💰 **Fonlama:** %{data['funding']:.4f}\n"
+                    )
+                    
+                    if data['has_futures']:
+                        mesaj += (
+                            f"📊 **Futures:** L:%{data['long_pct']:.0f} S:%{data['short_pct']:.0f} | OI Artış: %{oi_degisim:.1f}\n"
+                            f"💰 **Fonlama:** %{data['funding']:.4f}\n"
+                        )
+                    else:
+                        mesaj += f"🚫 **Futures:** Yok (Sadece Spot)\n"
+                        
+                    mesaj += (
                         f"🌊 **Spot:** RSI {data['rsi']:.1f} | Hacim {data['vol_ratio']:.1f}x\n\n"
                         f"🧠 **YORUM:** {YORUM}"
                     )
+                    
                     bot.send_message(CHAT_ID, mesaj, parse_mode='Markdown')
-                    time.sleep(1)
+                    time.sleep(1) 
 
-            print("💤 Mola...")
+            print("💤 Tüm Liste Tarandı. Dinleniyor...")
             time.sleep(120)
 
         except Exception as e:
