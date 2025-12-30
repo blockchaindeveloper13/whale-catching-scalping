@@ -13,9 +13,16 @@ BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
-exchange = ccxt.binance({
+# A) DENİZ KUVVETLERİ (SPOT PİYASA)
+exchange_spot = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'spot'} 
+})
+
+# B) HAVA KUVVETLERİ (FUTURES PİYASA - Sadece Bilgi İçin)
+exchange_futures = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'} 
 })
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -30,7 +37,6 @@ def calculate_rsi_from_df(df, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
 
-# Parabolic SAR
 def calculate_sar(high, low, af_step=0.02, af_max=0.2):
     sar = [0] * len(high)
     trend = [0] * len(high) 
@@ -38,7 +44,6 @@ def calculate_sar(high, low, af_step=0.02, af_max=0.2):
     ep = high[0]
     sar[0] = low[0]
     trend[0] = 1
-    
     for i in range(1, len(high)):
         prev_sar = sar[i-1]
         if trend[i-1] == 1: 
@@ -71,7 +76,6 @@ def calculate_sar(high, low, af_step=0.02, af_max=0.2):
                     af = min(af + af_step, af_max)
     return pd.Series(sar, index=high.index), trend[-1]
 
-# Alıcı/Satıcı Baskısı
 def analyze_dominance(df):
     close = df['close'].iloc[-1]
     low = df['low'].iloc[-1]
@@ -84,34 +88,59 @@ def analyze_dominance(df):
     elif score < 30: return "SATICILAR BASKIN 🔴", score
     else: return "Çekişmeli / Nötr ⚪", score
 
-# --- 3. DETAYLI ANALİZ ---
+# --- YENİ EKLENTİ: HAVA İSTİHBARATI (FUTURES) ---
+def get_futures_intel(symbol):
+    try:
+        # Symbol formatını düzelt (BTC/USDT -> BTCUSDT) çünkü futures API bazen böyle ister
+        clean_symbol = symbol.replace('/', '')
+        
+        # 1. Long/Short Ratio (En Kritik Veri)
+        # Binance API'den "Global Long/Short Ratio" çekiyoruz
+        ls_data = exchange_futures.fapiPublic_get_global_longshortaccountratio({
+            'symbol': clean_symbol,
+            'period': '5m',
+            'limit': 1
+        })
+        
+        # 2. Funding Rate
+        funding = exchange_futures.fetch_funding_rate(symbol)
+        
+        long_pct = float(ls_data[0]['longAccount']) * 100
+        short_pct = float(ls_data[0]['shortAccount']) * 100
+        ratio = float(ls_data[0]['longShortRatio'])
+        f_rate = funding['fundingRate'] * 100
+        
+        return {
+            'long_pct': round(long_pct, 1),
+            'short_pct': round(short_pct, 1),
+            'ratio': ratio,
+            'funding': round(f_rate, 4)
+        }
+    except:
+        return None # Futures verisi yoksa veya hata varsa boş dön
+
+# --- 3. DETAYLI ANALİZ (SPOT) ---
 def stratejik_analiz(symbol):
     try:
-        # A) 15 Dakikalık Veri (Trend ve Anlık Durum için)
-        bars_15m = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        # Veri çekme işlemleri (AYNI KALDI)
+        bars_15m = exchange_spot.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         df_15m = pd.DataFrame(bars_15m, columns=['t', 'o', 'h', 'l', 'c', 'v'])
         
-        # B) 1 Saatlik Veri (Hacim ve RSI için)
-        bars_1h = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=72) # 3 gün geriye
+        bars_1h = exchange_spot.fetch_ohlcv(symbol, timeframe='1h', limit=72)
         df_1h = pd.DataFrame(bars_1h, columns=['t', 'o', 'h', 'l', 'c', 'v'])
         
-        # C) 4 Saatlik Veri (RSI için)
-        bars_4h = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=30)
+        bars_4h = exchange_spot.fetch_ohlcv(symbol, timeframe='4h', limit=30)
         df_4h = pd.DataFrame(bars_4h, columns=['t', 'o', 'h', 'l', 'c', 'v'])
         
-        # D) Günlük Veri (RSI için)
-        bars_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
+        bars_1d = exchange_spot.fetch_ohlcv(symbol, timeframe='1d', limit=30)
         df_1d = pd.DataFrame(bars_1d, columns=['t', 'o', 'h', 'l', 'c', 'v'])
 
-        # --- HESAPLAMALAR ---
-        
-        # 1. RSI HESAPLAMALARI (Çoklu Zaman)
+        # Hesaplamalar (AYNI KALDI)
         rsi_15m = calculate_rsi_from_df(df_15m)
         rsi_1h = calculate_rsi_from_df(df_1h)
         rsi_4h = calculate_rsi_from_df(df_4h)
         rsi_1d = calculate_rsi_from_df(df_1d)
 
-        # 2. TREND (EMA & SAR - 15m)
         ema50 = df_15m['close'].ewm(span=50, adjust=False).mean().iloc[-1]
         fiyat = df_15m['close'].iloc[-1]
         sar_series, trend_yonu = calculate_sar(df_15m['h'], df_15m['l'])
@@ -119,20 +148,16 @@ def stratejik_analiz(symbol):
         ana_yon = "YUKARI 🚀" if fiyat > ema50 else "AŞAĞI 🔻"
         if trend_yonu == -1: ana_yon = "AŞAĞI 🔻"
 
-        # 3. SAHA DURUMU
         baski_durumu, baski_puani = analyze_dominance(df_15m)
 
-        # 4. HACİM DERİNLİĞİ (3 Günlük Ortalamaya Göre)
         vol_3day_avg = df_1h['v'].mean()
         if vol_3day_avg == 0: vol_3day_avg = 1
         
         vol_1h = df_1h['v'].iloc[-1]
         vol_4h = df_1h['v'].iloc[-4:].sum() / 4
-        vol_12h = df_1h['v'].iloc[-12:].sum() / 12
         
         kat_1h = vol_1h / vol_3day_avg
         kat_4h = vol_4h / vol_3day_avg
-        kat_12h = vol_12h / vol_3day_avg
 
         return {
             'fiyat': fiyat,
@@ -146,7 +171,6 @@ def stratejik_analiz(symbol):
             'rsi_1d': round(rsi_1d, 1),
             'kat_1h': round(kat_1h, 1),
             'kat_4h': round(kat_4h, 1),
-            'kat_12h': round(kat_12h, 1),
             'degisim_15m': round(((fiyat - df_15m['o'].iloc[-1])/df_15m['o'].iloc[-1])*100, 2)
         }
 
@@ -165,14 +189,14 @@ def keskin_nisanci_goreve():
     except:
         pass
 
-    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v9.5 Devrede. ÇOKLU RSI ve DERİN ANALİZ Başladı! 🔭")
+    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v10 (HAVA+DENİZ) Devrede! Masrafsız Entegrasyon Tamam. 🚁🚢")
     
     YASAKLI = ['USDC', 'FDUSD', 'TUSD', 'USDP', 'EUR', 'DAI', 'AEUR', 'USDE']
 
     while True:
         try:
-            print("🔄 Genelkurmay Analizi (v9.5)...")
-            markets = exchange.load_markets()
+            print("🔄 Genelkurmay Analizi (v10)...")
+            markets = exchange_spot.load_markets()
             
             hedefler = [
                 s for s in markets 
@@ -185,62 +209,57 @@ def keskin_nisanci_goreve():
             random.shuffle(hedefler)
             
             for symbol in hedefler:
-                # 1. SUSTURUCU
                 if symbol in sinyal_gecmisi:
                     if time.time() - sinyal_gecmisi[symbol] < 3600: continue
                 
                 try:
-                    # 2. HIZLI ELEME (Noise Filter)
-                    bars = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=5)
+                    # HIZLI ELEME (Filtreleri Gevşettik mi? Hayır, standart koruma)
+                    bars = exchange_spot.fetch_ohlcv(symbol, timeframe='1h', limit=5)
                     if not bars: continue
                     vol = [x[5] for x in bars]
-                    # Hacim artışı yoksa hiç detaya girme
                     if vol[-1] < (sum(vol[:-1])/4) * 2.0: continue 
 
-                    # 3. DETAYLI STRATEJİK ANALİZ
+                    # DETAYLI SPOT ANALİZİ
                     veri = stratejik_analiz(symbol)
                     if not veri: continue
                     
-                    # --- FİLTRELER ---
                     trend_onayi = (veri['fiyat'] > veri['ema50'])
-                    dip_firsati = (veri['rsi_15m'] < 35) or (veri['rsi_4h'] < 35) # 4 Saatlik dip de önemli
+                    dip_firsati = (veri['rsi_15m'] < 35) or (veri['rsi_4h'] < 35)
                     
                     if not (trend_onayi or dip_firsati): continue
-                    if veri['kat_4h'] < 1.5: continue
-
+                    
+                    # 🔥 BURASI YENİ: Futures İstihbaratını SADECE sinyal varsa çağırıyoruz
+                    futures_veri = get_futures_intel(symbol)
+                    
                     # --- RAPORLAMA ---
                     coin_ismi = symbol.split('/')[0]
                     
                     mesaj = (
-                        f"🐋 **GENELKURMAY RAPORU v9.5** 🚨\n\n"
+                        f"🐋 **GENELKURMAY RAPORU v10** 🚨\n\n"
                         f"💎 **{coin_ismi}** ({veri['fiyat']} $)\n"
                         f"🧭 **Trend:** {veri['ana_yon']}\n"
-                        f"⚔️ **Saha:** {veri['baski_durumu']} (%{veri['baski_puani']})\n\n"
-                        
-                        f"📊 **HACİM İSTİHBARATI:**\n"
-                        f"   • 1 Saatlik: {veri['kat_1h']} KAT 📈\n"
-                        f"   • 4 Saatlik: {veri['kat_4h']} KAT\n\n"
-                        
-                        f"🌡️ **RSI RADARI (Çoklu Zaman):**\n"
-                        f"   • 15 Dakika: {veri['rsi_15m']}\n"
-                        f"   • 1 Saat: {veri['rsi_1h']}\n"
-                        f"   • 4 Saat: {veri['rsi_4h']}\n"
-                        f"   • GÜNLÜK: {veri['rsi_1d']}\n\n"
-                        
-                        f"🧠 **KOMUTAN YORUMU:**\n"
+                        f"📊 **Hacim:** 1H: {veri['kat_1h']}x | 4H: {veri['kat_4h']}x\n"
+                        f"🌡️ **Günlük RSI:** {veri['rsi_1d']} (Genel Yön)\n\n"
                     )
                     
-                    # AKILLI YORUM SİSTEMİ
-                    if veri['rsi_1d'] > 85:
-                        mesaj += "⚠️ DİKKAT: Günlükte çok şişmiş! Büyük düşüş riski var. Sadece vur-kaç yap! 🛑"
-                    elif veri['rsi_4h'] < 30:
-                        mesaj += "✅ FIRSAT: 4 Saatlikte DİPTE! Dönüş başlarsa büyük kazandırır. 🎣"
-                    elif veri['baski_puani'] > 70 and veri['ana_yon'] == "YUKARI 🚀":
-                        mesaj += "🔥 SALDIRI: Alıcılar baskın, trend yukarı, RSI makul. Tam hedef! 🎯"
-                    elif "AŞAĞI" in veri['ana_yon']:
-                        mesaj += "🛡️ DEFANS: Hacim var ama trend henüz dönmedi. Takipte kal."
-                    else:
-                        mesaj += "Trend pozitif, hacim destekli. İzlemeye al! ✅"
+                    # FİNAL KOMUTAN YORUMU (HAVA DESTEKLİ)
+                    hava_yorumu = ""
+                    if futures_veri:
+                        mesaj += (
+                            f"✈️ **HAVA SAHASI (Futures):**\n"
+                            f"   • Longlar: %{futures_veri['long_pct']} 🟢\n"
+                            f"   • Shortlar: %{futures_veri['short_pct']} 🔴\n"
+                            f"   • Funding: %{futures_veri['funding']}\n\n"
+                        )
+                        
+                        if futures_veri['long_pct'] > 75:
+                            hava_yorumu = "⚠️ DİKKAT: Herkes Long açmış! Tuzak olabilir."
+                        elif futures_veri['short_pct'] > 75:
+                            hava_yorumu = "🚀 FIRSAT: Short Squeeze (Patlama) ihtimali yüksek!"
+                        else:
+                            hava_yorumu = "✅ Hava sahası dengeli."
+                    
+                    mesaj += f"🧠 **KOMUTAN KARARI:**\nSpot: Alıcı baskın (%{veri['baski_puani']}).\n{hava_yorumu} Takip et! 🛡️"
 
                     bot.send_message(CHAT_ID, mesaj, parse_mode='Markdown')
                     
@@ -263,3 +282,4 @@ def keskin_nisanci_goreve():
 
 if __name__ == "__main__":
     keskin_nisanci_goreve()
+            
