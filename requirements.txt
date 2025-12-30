@@ -1,0 +1,6 @@
+python-telegram-bot
+ccxt
+requests
+psycopg2-binary
+pandas
+numpy
