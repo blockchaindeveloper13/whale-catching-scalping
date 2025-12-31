@@ -3,6 +3,7 @@ import time
 import telebot
 import os
 import pandas as pd
+import numpy as np
 
 # --- AYARLAR ---
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -21,94 +22,95 @@ exchange_futures = ccxt.binance({
 })
 
 bot = telebot.TeleBot(BOT_TOKEN)
-OI_HAFIZA = {} 
 
-# --- YAPAY ZEKA YORUMCUSU ---
-def piyasayi_yorumla(long_pct, short_pct):
-    # Long Tarafı Baskınsa
-    if long_pct > 70:
-        return "🔥🔥 **KRİTİK UYARI:** Longlar aşırı şişti! (%70+). Balinalar 'Long Squeeze' (Ani çakılma) yapıp bunları likit edebilir. Ters işlem (Short) kovalamak için fırsat olabilir ama çok riskli!"
-    elif long_pct > 60:
-        return "🔥 **GÜÇLÜ ALIM:** Piyasa boğa iştahında. Kalabalık 'Yükselecek' diyor. Trende katılınabilir ama dönüşe dikkat et."
-    elif long_pct > 53:
-        return "🟢 **ALICILAR DEVREDE:** Ufak bir alım baskısı var. Henüz rüzgar sert değil ama yön yukarı dönüyor."
-    
-    # Short Tarafı Baskınsa
-    elif short_pct > 70:
-        return "🔥🔥 **KRİTİK UYARI:** Shortlar aşırı yığıldı! (%70+). Fiyatı aniden yukarı fişekleyip (Short Squeeze) bu ayıları avlayabilirler. DİKKAT!"
-    elif short_pct > 60:
-        return "❄️ **GÜÇLÜ SATIŞ:** Piyasa ayı modunda. Çoğunluk düşüş bekliyor. Düşen bıçak tutulmaz, dönüş sinyali bekle."
-    elif short_pct > 53:
-        return "🔴 **SATICILAR DEVREDE:** Satış baskısı hakim olmaya başladı. Rüzgar aşağıdan esiyor."
-    
-    else:
-        return "⚖️ **DENGELİ:** Piyasa kararsız. Yön tayini yapmak zor. İzlemede kal."
+# --- YARDIMCI FONKSİYON: RSI HESAPLA ---
+def calculate_rsi(df, period=14):
+    if df.empty: return 50.0
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
 
-def get_analysis_data(symbol, is_top_40):
+# --- VERİ TOPLAMA MERKEZİ ---
+def get_multiframe_data(symbol, is_top_40):
     clean_symbol = symbol.replace('/', '')
-    price = 0
-    rsi = 50
-    vol_ratio = 0
-    has_spot_data = False
-    
-    # 1. SPOT VERİSİ
-    try:
-        bars = exchange_spot.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-        df = pd.DataFrame(bars, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        rsi = rsi.iloc[-1]
-        
-        vol_avg = df['v'].mean()
-        vol_ratio = df['v'].iloc[-1] / vol_avg if vol_avg > 0 else 0
-        price = df['close'].iloc[-1]
-        has_spot_data = True
-    except:
-        has_spot_data = False
-
-    # 2. FUTURES VERİSİ (Sadece Top 40)
-    long_pct = 0; short_pct = 0; open_interest = 0; funding_rate = 0; has_futures = False
-
-    if is_top_40:
-        try:
-            ls_data = exchange_futures.fapiDataGetTopLongShortAccountRatio({
-                'symbol': clean_symbol, 'period': '15m', 'limit': 1
-            })
-            if ls_data:
-                item = ls_data[0] if isinstance(ls_data, list) else ls_data
-                long_pct = float(item['longAccount']) * 100
-                short_pct = float(item['shortAccount']) * 100
-                
-                if price == 0:
-                    ticker = exchange_futures.fetch_ticker(clean_symbol)
-                    price = ticker['last']
-                
-                oi_data = exchange_futures.fetch_open_interest(clean_symbol)
-                open_interest = float(oi_data['openInterestAmount'])
-                has_futures = True
-        except:
-            has_futures = False
-    
-    if not has_spot_data and not has_futures: return None
-
-    return {
-        'symbol': symbol, 'price': price,
-        'rsi': rsi, 'vol_ratio': vol_ratio,
-        'has_futures': has_futures,
-        'long_pct': long_pct, 'short_pct': short_pct,
-        'open_interest': open_interest
+    data = {
+        'symbol': symbol, 'price': 0,
+        'rsi_1h': 0, 'rsi_4h': 0, 'rsi_1d': 0,
+        'vol_ratio_1d': 0, # Günlük Hacim Artışı
+        'futures_data': {}, # 15m, 1h, 4h L/S oranları
+        'has_futures': False,
+        'spot_success': False
     }
 
+    # 1. SPOT VERİLERİ (RSI ve HACİM)
+    try:
+        # A) Günlük Veri (Hacim ve RSI 1d için)
+        # 14 günlük ortalama için limit=20 yeterli
+        bars_1d = exchange_spot.fetch_ohlcv(symbol, timeframe='1d', limit=30)
+        df_1d = pd.DataFrame(bars_1d, columns=['t', 'o', 'h', 'l', 'c', 'v'])
+        
+        data['price'] = df_1d['close'].iloc[-1]
+        data['rsi_1d'] = calculate_rsi(df_1d)
+        
+        # Hacim Analizi (Son gün vs 14 günlük ortalama)
+        # Son mum (bugün) tamamlanmamış olabilir ama "run rate"e bakarız
+        vol_current = df_1d['v'].iloc[-1]
+        vol_avg = df_1d['v'].rolling(window=14).mean().iloc[-2] # Dünü baz al
+        
+        if vol_avg > 0:
+            data['vol_ratio_1d'] = vol_current / vol_avg
+        else:
+            data['vol_ratio_1d'] = 0
+
+        # B) 4 Saatlik ve 1 Saatlik Veri (Sadece RSI için)
+        # API Limitini korumak için, eğer "Genel Tarama"daysak (Top 40 değilse)
+        # her zaman hepsini çekmeyebiliriz ama sen istedin, çekiyoruz.
+        
+        bars_4h = exchange_spot.fetch_ohlcv(symbol, timeframe='4h', limit=20)
+        data['rsi_4h'] = calculate_rsi(pd.DataFrame(bars_4h, columns=['t','o','h','l','c','v']))
+
+        bars_1h = exchange_spot.fetch_ohlcv(symbol, timeframe='1h', limit=20)
+        data['rsi_1h'] = calculate_rsi(pd.DataFrame(bars_1h, columns=['t','o','h','l','c','v']))
+        
+        data['spot_success'] = True
+
+    except Exception as e:
+        # print(f"Spot Hatası {symbol}: {e}")
+        pass
+
+    # 2. FUTURES VERİLERİ (Çoklu Zaman Dilimi)
+    # Sadece Top 40 veya Spot'ta sinyal verenler için detaylı bakılabilir
+    # Ama kodun sadeliği için Top 40'a her zaman bakacağız.
+    if is_top_40:
+        try:
+            frames = ['15m', '1h', '4h']
+            for frame in frames:
+                ls_data = exchange_futures.fapiDataGetTopLongShortAccountRatio({
+                    'symbol': clean_symbol, 'period': frame, 'limit': 1
+                })
+                if ls_data:
+                    item = ls_data[0] if isinstance(ls_data, list) else ls_data
+                    data['futures_data'][frame] = {
+                        'long': float(item['longAccount']) * 100,
+                        'short': float(item['shortAccount']) * 100
+                    }
+            if data['futures_data']:
+                data['has_futures'] = True
+        except:
+            data['has_futures'] = False
+            
+    return data
+
 def general_tarama():
-    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v23 (İSTİHBARATÇI MOD) Devrede!\n🧠 Bot artık sadece alarm vermiyor, veriyi YORUMLUYOR.\n📊 Futures Top 40 için eşik düşürüldü (%53).")
+    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v24 (STRATEJİK DERİNLİK) Devrede!\n📊 Zaman Dilimleri: 15dk, 1s, 4s, Günlük\n🌊 Odak: Günlük Hacmi 2x Artanlar ve Çoklu RSI")
     
     YASAKLI = ['UP/', 'DOWN/', 'BEAR', 'BULL', 'USDC', 'TUSD', 'USDP', 'FDUSD', 'EUR', 'DAI', 'PAXG', 'BUSD', 'USDE', 'USDD']
 
     while True:
-        print("🔄 Tarama Başlıyor...")
+        print("🔄 Detaylı Tarama Başlıyor...")
         try:
             tickers = exchange_spot.fetch_tickers()
             sorted_tickers = sorted(tickers.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
@@ -122,73 +124,78 @@ def general_tarama():
             
             for i, symbol in enumerate(hedef_liste):
                 is_top_40 = (i < 40)
-                if is_top_40: time.sleep(0.25)
-                else: time.sleep(0.1)
                 
-                data = get_analysis_data(symbol, is_top_40)
-                if not data: continue
+                # API limitine saygı (Çok fazla istek atıyoruz artık)
+                sleep_time = 0.3 if is_top_40 else 0.2
+                time.sleep(sleep_time)
                 
+                data = get_multiframe_data(symbol, is_top_40)
+                
+                # --- SİNYAL KONTROL ---
                 RAPOR_VAR = False
-                YORUM_METNI = ""
-                SEBEP_BASLIK = ""
+                BASLIK = ""
                 ICON = ""
-
-                # 1. FUTURES ANALİZİ (Öncelik: İstihbarat)
-                if data['has_futures']:
-                    # Eşik çok düşük (%53), amaç bilgi vermek
-                    if data['long_pct'] > 53 or data['short_pct'] > 53:
-                        RAPOR_VAR = True
-                        YORUM_METNI = piyasayi_yorumla(data['long_pct'], data['short_pct'])
-                        
-                        # Başlık Belirle
-                        if data['long_pct'] > 53: 
-                            SEBEP_BASLIK = f"LONG AĞIRLIKLI (%{data['long_pct']:.1f})"
-                            ICON = "🟢" if data['long_pct'] < 60 else "🔥"
-                        else: 
-                            SEBEP_BASLIK = f"SHORT AĞIRLIKLI (%{data['short_pct']:.1f})"
-                            ICON = "🔴" if data['short_pct'] < 60 else "❄️"
-
-                # 2. SPOT ANALİZİ (Hala önemli)
-                SPOT_ALERT = False
-                if data['vol_ratio'] > 2.5: SPOT_ALERT = True
-                if data['rsi'] < 30: SPOT_ALERT = True
                 
-                # Eğer Futures'ta bir şey yoksa ama Spot'ta varsa raporla
-                if not RAPOR_VAR and SPOT_ALERT:
+                # 1. GÜNLÜK HACİM PATLAMASI (En Önemlisi)
+                if data['vol_ratio_1d'] > 2.0:
                     RAPOR_VAR = True
+                    BASLIK = f"GÜNLÜK HACİM PATLAMASI ({data['vol_ratio_1d']:.1f}x)"
                     ICON = "🌊"
-                    SEBEP_BASLIK = "SPOT HAREKETLİLİK"
-                    YORUM_METNI = "Futures dengeli ama Spot tarafta hareket var."
-
-                # RAPOR GÖNDERİMİ
-                # Spam olmasın diye sadece "Spot Sinyali Olanları" VEYA "Futures'ta Ciddi Dengesizlik Olanları (>55)" atalım.
-                # %53-%55 arasını her dakika atarsa telefon kilitlenir. 
-                # Ama sen "Kriter koyma" dedin, o yüzden Top 40 için %53 üstünü atıyoruz.
                 
+                # 2. RSI DİP (Çoklu Teyit)
+                # Eğer hem 1s hem 4s RSI düşükse sağlam diptir
+                elif data['rsi_1h'] < 30 and data['rsi_4h'] < 35:
+                    RAPOR_VAR = True
+                    BASLIK = f"GÜÇLÜ DİP SİNYALİ"
+                    ICON = "💎"
+
+                # 3. FUTURES TUZAĞI (Sadece Top 40)
+                # 4 Saatlikte büyük bir yığılma varsa trenddir.
+                if data['has_futures']:
+                    f_4h = data['futures_data'].get('4h', {'long': 50, 'short': 50})
+                    if f_4h['long'] > 65:
+                        RAPOR_VAR = True
+                        if not BASLIK: 
+                            BASLIK = f"4S LONG YIĞILMASI (%{f_4h['long']:.1f})"
+                            ICON = "🔥"
+                    elif f_4h['short'] > 65:
+                        RAPOR_VAR = True
+                        if not BASLIK: 
+                            BASLIK = f"4S SHORT YIĞILMASI (%{f_4h['short']:.1f})"
+                            ICON = "❄️"
+
+                # RAPORLAMA (Sadece Sinyal Varsa veya Top 40'ta Ciddi Hareket Varsa)
                 if RAPOR_VAR:
-                    # Sadece Top 40 ise her türlü raporla (Çünkü sayı az, 40 tane), 
-                    # Diğerlerinde sadece Spot sinyali varsa raporla.
-                    if is_top_40 or SPOT_ALERT:
-                        mesaj = (f"🕵️ **İSTİHBARAT RAPORU** {ICON}\n"
-                                 f"📌 **{symbol}** ({data['price']} $)\n\n"
-                                 f"📊 **DURUM:** {SEBEP_BASLIK}\n")
+                    mesaj = (f"🕵️ **İSTİHBARAT RAPORU** {ICON}\n"
+                             f"📌 **{symbol}** ({data['price']} $)\n"
+                             f"📢 **SİNYAL:** {BASLIK}\n\n")
+                    
+                    # Spot Detayları
+                    mesaj += (f"🌊 **SPOT ANALİZİ:**\n"
+                              f"• Vol (Günlük): {data['vol_ratio_1d']:.1f}x (Ortalamanın Katı)\n"
+                              f"• RSI (1s): {data['rsi_1h']:.1f}\n"
+                              f"• RSI (4s): {data['rsi_4h']:.1f}\n"
+                              f"• RSI (Gün): {data['rsi_1d']:.1f}\n\n")
+                    
+                    # Futures Detayları (Varsa)
+                    if data['has_futures']:
+                        f15 = data['futures_data'].get('15m', {'long':0, 'short':0})
+                        f1h = data['futures_data'].get('1h', {'long':0, 'short':0})
+                        f4h = data['futures_data'].get('4h', {'long':0, 'short':0})
                         
-                        if data['has_futures']:
-                            mesaj += f"⚖️ **Oranlar:** L: %{data['long_pct']:.1f} | S: %{data['short_pct']:.1f}\n"
+                        mesaj += (f"⚖️ **VADELİ ORANLARI (L/S):**\n"
+                                  f"• 15dk: %{f15['long']:.1f} / %{f15['short']:.1f}\n"
+                                  f"• 1 Sa: %{f1h['long']:.1f} / %{f1h['short']:.1f}\n"
+                                  f"• 4 Sa: %{f4h['long']:.1f} / %{f4h['short']:.1f}\n")
                         
-                        mesaj += f"🌊 **Spot:** RSI {data['rsi']:.1f} | Hacim {data['vol_ratio']:.1f}x\n\n"
-                        mesaj += f"🧠 **ANALİZ:**\n{YORUM_METNI}"
-                        
-                        bot.send_message(CHAT_ID, mesaj, parse_mode='Markdown')
-                        time.sleep(1)
+                    bot.send_message(CHAT_ID, mesaj, parse_mode='Markdown')
 
             print("💤 Tur Bitti. Mola...")
             time.sleep(120)
 
         except Exception as e:
-            print(f"Hata: {e}")
+            print(f"Genel Hata: {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
     general_tarama()
-            
