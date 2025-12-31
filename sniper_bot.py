@@ -3,7 +3,6 @@ import time
 import telebot
 import os
 import pandas as pd
-from datetime import datetime
 
 # --- AYARLAR ---
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -28,7 +27,7 @@ def get_analysis_data(symbol, is_top_40):
     try:
         clean_symbol = symbol.replace('/', '')
         
-        # 1. SPOT İSTİHBARATI (HERKESE YAPILIR)
+        # 1. SPOT İSTİHBARATI
         try:
             bars = exchange_spot.fetch_ohlcv(symbol, timeframe='15m', limit=50)
         except: return None 
@@ -44,10 +43,9 @@ def get_analysis_data(symbol, is_top_40):
         vol_ratio = df['v'].iloc[-1] / vol_avg if vol_avg > 0 else 0
         current_price = df['close'].iloc[-1]
 
-        # 2. FUTURES İSTİHBARATI (SADECE İLK 40 COIN İÇİN)
+        # 2. FUTURES İSTİHBARATI
         long_pct = 0; short_pct = 0; open_interest = 0; funding_rate = 0; has_futures = False
 
-        # EĞER COIN İLK 40'TAYSA VE API IZNIMIZ VARSA BAK
         if is_top_40:
             try:
                 ls_data = exchange_futures.fapiDataGetTopLongShortAccountRatio({
@@ -76,12 +74,12 @@ def get_analysis_data(symbol, is_top_40):
     except: return None
 
 def general_tarama():
-    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v17 (HİBRİT MOD) Devrede!\n🌊 Spot: TÜMÜ (500+ Coin)\n✈️ Futures: Sadece TOP 40\n🚀 Hız ve Kapsam Optimize Edildi.")
+    bot.send_message(CHAT_ID, "🎖️ KOMUTANIM! Radar v19 (AKTİF MOD) Devrede!\n🔍 Eşikler:\n• Hacim: >2.5x (Hassas)\n• RSI: <30 (Dip)\n• L/S: >%53\n🚀 Artık kuş uçsa haberimiz olacak!")
     
     YASAKLI = ['UP/', 'DOWN/', 'BEAR', 'BULL', 'USDC', 'TUSD', 'USDP', 'FDUSD', 'EUR', 'DAI', 'PAXG', 'BUSD', 'USDE', 'USDD']
 
     while True:
-        print("🔄 Hibrit Tarama Başlıyor...")
+        print("🔄 Tarama Başlıyor (Aktif Mod)...")
         try:
             tickers = exchange_spot.fetch_tickers()
             sorted_tickers = sorted(tickers.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
@@ -91,14 +89,10 @@ def general_tarama():
                 if t[0].endswith('/USDT') and not any(x in t[0] for x in YASAKLI):
                     hedef_liste.append(t[0])
             
-            print(f"🎯 Toplam Hedef: {len(hedef_liste)} Coin")
+            print(f"🎯 Hedef: {len(hedef_liste)} Coin")
             
-            # DÖNGÜ BAŞLIYOR
             for i, symbol in enumerate(hedef_liste):
-                # İLK 40 COIN Mİ? (Sıfırdan başladığı için index < 40)
                 is_top_40 = (i < 40)
-                
-                # Top 40 ise biraz yavaşla (API isteği çok), değilse hızla geç
                 if is_top_40: time.sleep(0.2)
                 else: time.sleep(0.1)
                 
@@ -107,30 +101,30 @@ def general_tarama():
                 
                 RAPOR_VAR = False; SEBEP = ""; ICON = ""; YORUM = ""
                 
-                # --- SİNYALLER ---
+                # --- GEVŞETİLMİŞ FİLTRELER ---
                 
-                # A) SPOT SİNYALLERİ (HERKES İÇİN)
-                if data['vol_ratio'] > 5.0:
+                # A) SPOT
+                if data['vol_ratio'] > 2.5: # 2.5 Kat Hacim Yeterli
                     RAPOR_VAR = True
-                    SEBEP = f"SPOT HACİM PATLAMASI ({data['vol_ratio']:.1f}x)"
+                    SEBEP = f"HACİM HAREKETLİLİĞİ ({data['vol_ratio']:.1f}x)"
                     ICON = "🌊"
-                    YORUM = "Devasa hacim girişi var!"
-                elif data['rsi'] < 20:
+                    YORUM = "Ortalamanın üzerinde hacim girişi var."
+                elif data['rsi'] < 30: # Standart Dip
                     RAPOR_VAR = True
-                    SEBEP = f"AŞIRI DİP (RSI: {data['rsi']:.1f})"
+                    SEBEP = f"DİP FIRSATI (RSI: {data['rsi']:.1f})"
                     ICON = "💎"
-                    YORUM = "Fiyat çok ucuzladı."
+                    YORUM = "RSI 30'un altında, tepki gelebilir."
 
-                # B) FUTURES SİNYALLERİ (SADECE TOP 40)
+                # B) FUTURES (%53 Yeterli)
                 if data['has_futures']:
-                    if data['long_pct'] > 60: 
+                    if data['long_pct'] > 53: 
                         RAPOR_VAR = True
-                        if not SEBEP: SEBEP = f"BALİNA LONGLARI (%{data['long_pct']:.1f})"
-                        else: YORUM += "\n⚠️ Futures tarafında Long yığılması (Tuzak Riski)."
-                    elif data['short_pct'] > 60:
+                        if not SEBEP: SEBEP = f"LONG AĞIRLIKLI (%{data['long_pct']:.1f})"
+                        else: YORUM += "\n⚠️ Futures tarafı Longa dönüyor."
+                    elif data['short_pct'] > 53:
                         RAPOR_VAR = True
-                        if not SEBEP: SEBEP = f"BALİNA SHORTLARI (%{data['short_pct']:.1f})"
-                        else: YORUM += "\n🚀 Futures tarafında Short yığılması (Squeeze Fırsatı)."
+                        if not SEBEP: SEBEP = f"SHORT AĞIRLIKLI (%{data['short_pct']:.1f})"
+                        else: YORUM += "\n🚀 Futures tarafı Shorta dönüyor."
 
                     clean_sym = symbol.replace('/','')
                     prev_oi = OI_HAFIZA.get(clean_sym, data['open_interest'])
@@ -138,16 +132,16 @@ def general_tarama():
                     else: oi_degisim = ((data['open_interest'] - prev_oi) / prev_oi) * 100
                     OI_HAFIZA[clean_sym] = data['open_interest']
                     
-                    if abs(oi_degisim) > 5.0:
+                    if abs(oi_degisim) > 3.0: 
                         RAPOR_VAR = True
-                        if not SEBEP: SEBEP = f"OI PATLAMASI (%{oi_degisim:.1f})"
+                        if not SEBEP: SEBEP = f"OI DEĞİŞİMİ (%{oi_degisim:.1f})"
                         ICON = "🐳"
 
                 if RAPOR_VAR:
-                    mesaj = (f"🐋 **GENELKURMAY RAPORU** {ICON}\n🚨 **ALARM:** {SEBEP}\n\n💎 **{symbol}** ({data['price']} $)\n")
+                    mesaj = (f"🐋 **RADAR TESPİTİ** {ICON}\n🚨 **TİP:** {SEBEP}\n\n💎 **{symbol}** ({data['price']} $)\n")
                     if data['has_futures']:
-                        mesaj += (f"📊 **Futures (Top 40):** L:%{data['long_pct']:.0f} S:%{data['short_pct']:.0f}\n💰 **Fonlama:** %{data['funding']:.4f}\n")
-                    mesaj += (f"🌊 **Spot:** RSI {data['rsi']:.1f} | Hacim {data['vol_ratio']:.1f}x\n🧠 **YORUM:** {YORUM}")
+                        mesaj += (f"📊 **Futures:** L:%{data['long_pct']:.0f} S:%{data['short_pct']:.0f}\n")
+                    mesaj += (f"🌊 **Spot:** RSI {data['rsi']:.1f} | Hacim {data['vol_ratio']:.1f}x")
                     
                     bot.send_message(CHAT_ID, mesaj, parse_mode='Markdown')
                     time.sleep(1)
@@ -161,4 +155,4 @@ def general_tarama():
 
 if __name__ == "__main__":
     general_tarama()
-                                                                    
+            
