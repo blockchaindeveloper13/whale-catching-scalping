@@ -134,12 +134,19 @@ def get_full_report(symbol):
 
 def ask_gemini(symbol, report, last_signal):
     try:
-        prompt = (f"Sen Vedat Paşa'sın. Askeri nizamda konuş. Coin: {symbol}. "
-                  f"Eski Sinyal: {last_signal}. Veriler:\n{report}\n"
-                  f"Yorumla ve Karar Ver: (AL/SAT/BEKLE). Kısa olsun.")
+        # PROMTPT DEĞİŞTİ: Artık Komutan değil, Finans Analisti
+        prompt = (f"Sen uzman bir Kripto Para Analistisin. Asla askeri terim kullanma. "
+                  f"Analiz edilen: {symbol}. "
+                  f"Eski Sinyal: {last_signal}. \n"
+                  f"Teknik Veriler:\n{report}\n"
+                  f"GÖREVİN:\n"
+                  f"1. Verileri finansal bir dille yorumla (Trend, RSI, Hacim uyumu vb.).\n"
+                  f"2. Risk durumunu belirt.\n"
+                  f"3. SONUÇ OLARAK NET BİR TAVSİYE VER: (AL / SAT / BEKLE).\n"
+                  f"Kısa, öz ve profesyonel ol.")
         return model.generate_content(prompt).text
-    except Exception as e: return f"Komutan meşgul: {e}"
-
+    except Exception as e: return f"Analist şu an yanıt veremiyor: {e}"
+        
 # --- WEBHOOK ROTASI (POSTMAN GİBİ ÇALIŞIR) ---
 @server.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
@@ -197,48 +204,48 @@ def komut_analiz(m):
 @bot.message_handler(func=lambda message: True)
 def sohbet_et(message):
     try:
-        text = message.text.upper() # Mesajı büyük harfe çevir
+        text = message.text.upper() 
         
-        # 1. EĞER CÜMLEDE ANALİZ EMRİ VARSA (GİZLİ KOMUT)
-        # Paşam buraya senin portföyündeki coinleri ekledim
+        # Coin Listesi
         COINLER = ["BTC", "ETH", "SOL", "AAVE", "LTC", "LINK", "AVAX", "XLM", "SUI", "BCH"]
         
         bulunan_coin = None
         for coin in COINLER:
-            if coin in text: # Mesela "AAVE ne olur?" cümlesinde AAVE var mı?
+            if coin in text:
                 bulunan_coin = coin
                 break
         
-        # Eğer hem coin ismi var, hem de analiz isteği varsa
-        tetikleyiciler = ["ANALIZ", "DURUM", "NE OLUR", "YORUMLA", "BAK", "RAPOR"]
+        # TETİKLEYİCİLERİ GENİŞLETTİK (Artık laftan anlıyor)
+        tetikleyiciler = ["ANALIZ", "DURUM", "NE OLUR", "YORUMLA", "BAK", "RAPOR", "TAKIP", "IZLE", "FIYAT", "KAC", "NEDIR"]
+        
         if bulunan_coin and any(x in text for x in tetikleyiciler):
             
-            bot.reply_to(message, f"🫡 Emredersiniz Paşam! {bulunan_coin} cephesine derhal bağlanıyorum...")
+            bot.reply_to(message, f"🔎 {bulunan_coin} için verileri inceliyorum, bir saniye...")
             
-            # Tıpkı /analiz komutu gibi gerçek veriyi çekiyoruz
             symbol = f"{bulunan_coin}/USDT"
             report, price = get_full_report(symbol)
             
             if report:
-                # Gemini'ye veriyi yorumlat
                 yorum = ask_gemini(symbol, report, "Bilinmiyor")
-                bot.send_message(message.chat.id, f"🧠 **{symbol} İSTİHBARATI:**\n\n{yorum}", parse_mode='Markdown')
+                bot.send_message(message.chat.id, f"📊 **{symbol} TEKNİK RAPORU:**\n\n{yorum}", parse_mode='Markdown')
             else:
-                bot.reply_to(message, "❌ Veri alınamadı Komutanım.")
-            return # Fonksiyonu burada bitir, aşağıya (sohbete) geçmesin
+                bot.reply_to(message, "❌ Borsa verisine ulaşılamadı.")
+            return
 
-        # 2. EĞER ANALİZ EMRİ YOKSA NORMAL SOHBET ET (GEYİK YAP)
+        # NORMAL SOHBET (Role-Play yok, Yardımcı Asistan Modu)
         if message.text.startswith('/'): return
 
-        prompt = (f"Sen Vedat Paşa'sın. Sert, disiplinli, hafif argolu konuşan Türk Komutanısın. "
+        prompt = (f"Sen 'Borsa Asistanı' isminde yardımcı bir yapay zekasın. "
                   f"Kullanıcı sana şunu dedi: '{message.text}'. "
-                  f"Buna rolüne uygun kısa cevap ver. Asla yapay zeka olduğunu söyleme.")
+                  f"Ona kibar, kısa ve net cevap ver. Asla askeri terim veya argo kullanma. "
+                  f"Finansal konularda yardımcı olmaya çalış.")
         
         response = model.generate_content(prompt)
         bot.reply_to(message, response.text)
         
     except Exception as e:
         print(f"Sohbet Hatası: {e}")
+        
         
         
 
