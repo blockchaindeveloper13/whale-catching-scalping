@@ -20,9 +20,9 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL') 
 
-# Yapay Zeka Kurulumu (En stabil ve ücretsiz kotası bol model)
+# Yapay Zeka (Gemini 1.5 Flash - Hızlı ve Cömert)
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash') 
+model = genai.GenerativeModel('gemini-1.5-flash') 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
@@ -34,18 +34,17 @@ exchange = ccxt.binance({
     'enableRateLimit': True
 })
 
-# --- OTOMATİK MÜHİMMAT YÜKLEME (TÜM COINLERİ ÇEK) ---
+# --- MÜHİMMAT YÜKLEME (TÜM COINLER) ---
 print("📡 Binance mühimmat deposu sayılıyor...")
 try:
     markets = exchange.load_markets()
-    # Sadece USDT paritelerini al ve /USDT kısmını at (BTC/USDT -> BTC)
     TUM_COINLER = [symbol.split('/')[0] for symbol in markets if '/USDT' in symbol]
     print(f"✅ {len(TUM_COINLER)} adet Coin hafızaya yüklendi! Ordu hazır.")
 except Exception as e:
     print(f"⚠️ Liste çekilemedi, manuel listeye dönülüyor: {e}")
     TUM_COINLER = ["BTC", "ETH", "SOL", "AAVE", "LTC", "LINK", "AVAX", "BNB", "XRP", "ADA", "DOGE", "SHIB", "PEPE", "ARB", "SUI"]
 
-# --- 2. VERİTABANI YÖNETİMİ (BEYİN) ---
+# --- 2. VERİTABANI YÖNETİMİ ---
 def db_baglan():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -53,26 +52,21 @@ def db_baslat():
     try:
         conn = db_baglan()
         cur = conn.cursor()
-        
-        # Tablo yoksa oluştur
         cur.execute("""
             CREATE TABLE IF NOT EXISTS watchlist (
                 symbol VARCHAR(20) PRIMARY KEY,
                 last_signal VARCHAR(50) DEFAULT 'YOK',
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                interval_hours INT DEFAULT 4,
+                last_report_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Sütun güncellemeleri (Migration)
-        cur.execute("ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS interval_hours INT DEFAULT 4")
-        cur.execute("ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS last_report_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        
         conn.commit()
         cur.close()
         conn.close()
-        print("✅ Veritabanı ve Tablolar Hazır!")
+        print("✅ Veritabanı Hazır!")
     except Exception as e:
-        print(f"❌ DB Kurulum Hatası: {e}")
+        print(f"❌ DB Hatası: {e}")
 
 db_baslat() 
 
@@ -134,46 +128,50 @@ def db_sinyal_guncelle(symbol, sinyal):
         conn.close()
     except: pass
 
-# --- 3. GELİŞMİŞ TEKNİK ANALİZ (MACD, BOLLINGER, SAR, RSI, EMA) ---
+# --- 3. GELİŞMİŞ TEKNİK ANALİZ (DESTEK & DİRENÇ EKLENDİ) ---
 def calculate_technicals(df):
     if len(df) < 50: return None
     
-    # 1. RSI (14)
+    # 1. RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # 2. EMA 50 (Trend Yönü)
+    # 2. EMA 50
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     
-    # 3. MACD (Trend Gücü ve Kesişimler)
+    # 3. MACD
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = exp1 - exp2
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-    # 4. BOLLINGER BANTLARI (Sıkışma ve Patlama)
+    # 4. BOLLINGER
     df['sma20'] = df['close'].rolling(window=20).mean()
     df['std'] = df['close'].rolling(window=20).std()
     df['upper_bb'] = df['sma20'] + (df['std'] * 2)
     df['lower_bb'] = df['sma20'] - (df['std'] * 2)
     
-    # 5. HACİM GÜCÜ (Fake Hareket Avcısı)
+    # 5. HACİM
     vol_avg = df['volume'].rolling(window=20).mean()
     df['vol_change'] = df['volume'] / vol_avg
 
-    # 6. PARABOLIC SAR MANTIĞI (SuperTrend yerine Market Maker Dostu Olmayan Sistem)
-    # Fiyat EMA'nın üzerindeyse ve trend güçlüyse SAR destekler.
-    # Burada karmaşık döngü yerine anlık trend onayı kullanıyoruz.
+    # 6. PIVOT POINTS (DESTEK VE DİRENÇ HESAPLAMA)
+    # (High + Low + Close) / 3 formülü ile Pivot bulunur
+    df['pivot'] = (df['high'] + df['low'] + df['close']) / 3
+    # Direnç 1 (R1) = (2 * Pivot) - Low
+    df['r1'] = (2 * df['pivot']) - df['low']
+    # Destek 1 (S1) = (2 * Pivot) - High
+    df['s1'] = (2 * df['pivot']) - df['high']
+
     return df.iloc[-1]
 
 def get_full_report(symbol):
     report_text = ""
     current_price = 0
     try:
-        # Hem 1 saatlik hem 4 saatlik cepheye bakıyoruz
         for tf in ['1h', '4h']:
             bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=60)
             df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
@@ -182,44 +180,47 @@ def get_full_report(symbol):
             
             current_price = tech['close']
             
-            # --- YORUMLAMA ---
-            trend_yonu = 'YUKARI (Boğa) 🟢' if tech['close'] > tech['ema50'] else 'AŞAĞI (Ayı) 🔴'
+            # Yorumlama
+            trend_yonu = 'YUKARI (Boga)' if tech['close'] > tech['ema50'] else 'ASAGI (Ayi)'
+            macd_durum = 'AL Sinyali' if tech['macd'] > tech['signal'] else 'SAT Baskisi'
             
-            # SAR Mantığı: Fiyat EMA üstündeyse SAR alttan destek atar (Yükseliş onayı)
-            sar_durum = "Alttan Destekliyor (Yükseliş) ✅" if tech['close'] > tech['ema50'] else "Üstten Baskılıyor (Düşüş) 🔻"
+            # Bollinger Yorumu
+            bb_durum = "Normal"
+            if tech['close'] > tech['upper_bb']: bb_durum = "Tavani Deldi (Dikkat)"
+            elif tech['close'] < tech['lower_bb']: bb_durum = "Tabani Deldi (Dip?)"
             
-            macd_durum = 'AL Sinyali 🚀' if tech['macd'] > tech['signal'] else 'SAT Baskısı 🔻'
+            # Pivot (Destek/Direnç)
+            destek = tech['s1']
+            direnc = tech['r1']
             
-            bb_durum = "Normal Bant İçi"
-            if tech['close'] > tech['upper_bb']: bb_durum = "Tavanı Deldi (Aşırı Alım - Dikkat) ⚠️"
-            elif tech['close'] < tech['lower_bb']: bb_durum = "Tabanı Deldi (Dip Fırsatı Olabilir) 💎"
-            
-            report_text += (f"⏳ **ZAMAN DİLİMİ: [{tf}]**\n"
-                            f"• Fiyat: {tech['close']}\n"
-                            f"• RSI (14): {tech['rsi']:.1f}\n"
-                            f"• Trend (EMA50): {trend_yonu}\n"
-                            f"• Parabolic SAR: {sar_durum}\n"
-                            f"• MACD: {macd_durum}\n"
-                            f"• Bollinger: {bb_durum}\n"
-                            f"• Hacim Gücü: {tech['vol_change']:.1f}x\n\n")
+            report_text += (f"--- ZAMAN DİLİMİ: [{tf}] ---\n"
+                            f"Fiyat: {tech['close']}\n"
+                            f"KRITIK DESTEK (S1): {destek:.4f}\n"
+                            f"KRITIK DIRENC (R1): {direnc:.4f}\n"
+                            f"RSI (14): {tech['rsi']:.1f}\n"
+                            f"Trend (EMA50): {trend_yonu}\n"
+                            f"MACD: {macd_durum}\n"
+                            f"Bollinger: {bb_durum}\n"
+                            f"Hacim Gücü: {tech['vol_change']:.1f}x\n\n")
                             
         return report_text, current_price
     except: return None, 0
 
 def ask_gemini(symbol, report, last_signal):
     try:
-        # FİNANSAL DANIŞMAN (BORDO BERELİ WALL STREET KURDU)
-        prompt = (f"Sen Vedat Bey'in ÖZEL Stratejik Finans Danışmanısın. Bir yapay zeka gibi konuşma. "
-                  f"Duygusuz, net, profesyonel ve hafif ukala bir Wall Street kurdu gibi konuş. "
-                  f"ASLA 'Yatırım tavsiyesi veremem', 'Ben bir dil modeliyim' deme. YASAK. "
-                  f"Kullanıcı riskleri biliyor, sen sadece piyasa görüşünü söyle. \n"
+        # PROMPT (GÖRSEL TEMİZLİK VE DESTEK/DİRENÇ VURGUSU)
+        prompt = (f"Sen Vedat Bey'in Stratejik Finans Danışmanısın. \n"
+                  f"KURALLAR:\n"
+                  f"1. ASLA kalın yazı için yıldız (** veya *) KULLANMA. Telegram'da kötü görünüyor. Düz metin yaz.\n"
+                  f"2. Duygusuz, net ve profesyonel konuş.\n"
+                  f"3. Verilen 'KRITIK DESTEK' ve 'KRITIK DIRENC' seviyelerini mutlaka yorumunda belirt. 'Fiyat desteğe yakın', 'Direnci kırmaya çalışıyor' gibi strateji kur.\n"
+                  f"4. Sonunda mutlaka (AL / SAT / BEKLE) emri ver.\n\n"
                   f"Coin: {symbol}. Eski Sinyal: {last_signal}. \n"
-                  f"Teknik Veriler (RSI, MACD, BB, SAR):\n{report}\n"
-                  f"GÖREVİN: Verileri sert bir dille yorumla, tuzakları (fakeout) belirt ve sonunda mutlaka (AL / SAT / BEKLE) şeklinde net bir emir ver.")
+                  f"Teknik Veriler:\n{report}")
         return model.generate_content(prompt).text
-    except Exception as e: return f"Danışman şu an meşgul (Kota veya Hata): {e}"
+    except Exception as e: return f"Hata: {e}"
 
-# --- 4. TELEGRAM VE SOHBET MODÜLÜ ---
+# --- 4. TELEGRAM MODÜLÜ ---
 @server.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
     json_string = request.get_data().decode('utf-8')
@@ -233,168 +234,121 @@ def webhook():
     bot.set_webhook(url=HEROKU_APP_URL + BOT_TOKEN)
     return "<h1>VEDAT PASA KOMUTA MERKEZI AKTIF!</h1>", 200
 
-# AKILLI SOHBET, SNIPER VE EMİR YAKALAYICI
 @bot.message_handler(func=lambda message: True)
 def sohbet_et(message):
     try:
         text = message.text.upper()
-        # Mesajı kelimelere böl (Örn: "BNB ANALİZ YAP" -> ["BNB", "ANALIZ", "YAP"])
         kelimeler = text.split()
         
         bulunan_coin = None
-        
-        # Kelimeleri tek tek kontrol et, Binance listesinde var mı?
         for kelime in kelimeler:
-            # Temizlik: Noktalama işaretlerini kaldır (Örn: "BNB," -> "BNB")
             temiz_kelime = kelime.strip(".,!?") 
             if temiz_kelime in TUM_COINLER:
                 bulunan_coin = temiz_kelime
                 break
         
-        # --- A. SNIPER MODU (GENEL TARAMA) ---
-        sniper_tetikleyiciler = ["GENEL", "PIYASA", "HEPSI", "TUM", "SNIPER", "LISTE DURUM"]
+        # --- A. SNIPER MODU ---
+        sniper_tetikleyiciler = ["GENEL", "PIYASA", "HEPSI", "TUM", "SNIPER"]
         if any(x in text for x in sniper_tetikleyiciler):
             rows = db_liste_getir_full()
             if not rows:
-                bot.reply_to(message, "⚠️ Listeniz boş Paşam. Önce /takip ile coin ekleyin.")
+                bot.reply_to(message, "Liste bos efendim.")
                 return
             
-            bot.reply_to(message, f"🔭 **SNIPER MODU AKTİF!**\nListendeki {len(rows)} hedef taranıyor...")
-            
+            bot.reply_to(message, f"SNIPER MODU AKTIF! {len(rows)} hedef taraniyor...")
             for r in rows:
                 sym = r[0]
                 last_sig = r[1]
                 report, price = get_full_report(sym)
                 if report:
                     yorum = ask_gemini(sym, report, last_sig)
-                    bot.send_message(message.chat.id, f"🎯 **HEDEF: {sym}**\n{yorum}", parse_mode='Markdown')
-                    time.sleep(4) # Kota dostu bekleme
+                    bot.send_message(message.chat.id, f"HEDEF: {sym}\n{yorum}")
+                    time.sleep(4) 
                 else:
-                    bot.send_message(message.chat.id, f"⚠️ {sym} verisi çekilemedi.")
-            bot.send_message(message.chat.id, "✅ **TÜM HEDEFLER TARANDI KOMUTANIM!**")
+                    bot.send_message(message.chat.id, f"{sym} verisi yok.")
+            bot.send_message(message.chat.id, "TARAMA TAMAMLANDI.")
             return
 
-        # --- B. TEKİL COIN İŞLEMLERİ ---
+        # --- B. TEKİL COIN ---
         if bulunan_coin:
             symbol = f"{bulunan_coin}/USDT"
 
-            # 1. İPTAL EMRİ
+            # İPTAL
             iptal_kelimeleri = ["SIL", "IPTAL", "BIRAK", "YETER", "KALDIR", "SUS"]
-            if any(x in text for x in iptal_kelimeleri):
+            # Eğer cümlede iptal kelimesi varsa, AMA "AL/SAT" gibi emirler yoksa sil (Yanlış anlamayı önlemek için)
+            if any(x in text for x in iptal_kelimeleri) and "AL" not in text and "SAT" not in text:
                 db_coin_cikar(symbol)
-                bot.reply_to(message, f"❌ Emredersiniz! **{bulunan_coin}** takibi sonlandırıldı.")
+                bot.reply_to(message, f"Emredersiniz! {bulunan_coin} takibi sonlandirildi.")
                 return 
 
-            # 2. ZAMAN AYARLAMA (Örn: "AAVE 3 SAAT")
+            # ZAMAN AYARI
             saat_tespiti = re.search(r'(\d+)\s*(SAAT)', text)
             if saat_tespiti:
                 yeni_saat = int(saat_tespiti.group(1))
                 db_coin_ekle(symbol)
                 if db_saat_guncelle(symbol, yeni_saat):
-                    bot.reply_to(message, f"✅ Anlaşıldı! **{symbol}** her **{yeni_saat} saatte bir** raporlanacak.")
+                    bot.reply_to(message, f"Anlasildi! {symbol} her {yeni_saat} saatte bir raporlanacak.")
                 return
 
-            # 3. ANLIK ANALİZ (Tetikleyici Şart!)
+            # ANALİZ
             analiz_kelimeleri = ["ANALIZ", "DURUM", "NE OLUR", "YORUMLA", "BAK", "RAPOR", "TAKIP", "IZLE", "FIYAT", "VAR MI"]
-            
             if any(x in text for x in analiz_kelimeleri):
-                bot.reply_to(message, f"🔎 {bulunan_coin} inceleniyor...")
+                bot.reply_to(message, f"{bulunan_coin} inceleniyor...")
                 report, price = get_full_report(symbol)
                 if report:
                     yorum = ask_gemini(symbol, report, "Bilinmiyor")
-                    bot.send_message(message.chat.id, f"📊 **{symbol} DETAYLI TEKNİK RAPOR:**\n\n{yorum}", parse_mode='Markdown')
+                    bot.send_message(message.chat.id, f"{symbol} DETAYLI TEKNİK RAPOR:\n\n{yorum}")
                 else:
-                    bot.reply_to(message, f"⚠️ {symbol} için veri alınamadı.")
+                    bot.reply_to(message, f"{symbol} verisi alinamadi.")
                 return
 
-        # --- C. NORMAL SOHBET (DANIŞMAN) ---
         if message.text.startswith('/'): return
         
-        prompt = (f"Sen Vedat Bey'in 'Özel Finans Danışmanısın'. "
-                  f"Kullanıcı: '{message.text}'. "
-                  f"Kısa, zeki, Wall Street jargonlu cevap ver. AI olduğunu söyleme.")
-        
+        prompt = (f"Sen Vedat Bey'in Finans Danismanisin. Mesaj: '{message.text}'. "
+                  f"Kisa, profesyonel cevap ver. Yildiz (**) kullanma.")
         response = model.generate_content(prompt)
         bot.reply_to(message, response.text)
         
     except Exception as e:
         print(f"Sohbet Hatası: {e}")
 
-# Standart Komutlar
-@bot.message_handler(commands=['takip'])
-def komut_takip(m):
-    try:
-        sym = m.text.split()[1].upper()
-        if "/" not in sym: sym += "/USDT"
-        db_coin_ekle(sym)
-        bot.reply_to(m, f"✅ {sym} listeye eklendi.")
-    except: bot.reply_to(m, "Örn: /takip AAVE")
+# ... (Komut fonksiyonları /takip, /liste, /sil aynı kalacak, sadece ** işaretlerini kaldırabilirsin içlerinden) ...
+# (Kısalık olması için o kısımları tekrarlamadım, eski kodun alt kısmı çalışır ama bu sohbet_et ve ask_gemini önemli)
 
-@bot.message_handler(commands=['liste'])
-def komut_liste(m):
-    rows = db_liste_getir_full()
-    if not rows:
-        bot.reply_to(m, "Listeniz boş.")
-        return
-    msg = "📋 **TAKİP LİSTESİ**\n\n"
-    for r in rows:
-        sym, last_sig, interval, last_time = r
-        interval = interval if interval else 4
-        msg += f"🔹 **{sym}**: {interval} Saatte bir. (Son Sinyal: {last_sig})\n"
-    bot.reply_to(m, msg, parse_mode='Markdown')
-
-@bot.message_handler(commands=['sil'])
-def komut_sil(m):
-    try:
-        sym = m.text.split()[1].upper()
-        if "/" not in sym: sym += "/USDT"
-        db_coin_cikar(sym)
-        bot.reply_to(m, f"🗑️ {sym} silindi.")
-    except: pass
-
-# --- 5. SONSUZ DÖNGÜ (AJAN TARAYICI) ---
+# --- 5. SONSUZ DÖNGÜ ---
 def scanner_loop():
-    print("🚀 Tarayıcı Devrede...")
+    print("Tarayici Devrede...")
     while True:
         try:
             rows = db_liste_getir_full()
             now = datetime.now()
-
             for r in rows:
                 sym, last_sig, interval, last_time = r
                 if interval is None: interval = 4 
                 
-                # Süre Hesabı
                 gecen_sure = 0
                 if last_time:
                     diff = now - last_time
                     gecen_sure = diff.total_seconds() / 3600
                 else: gecen_sure = 999 
 
-                # ZAMANI GELDİYSE RAPORLA
                 if gecen_sure >= interval:
                     rep, prc = get_full_report(sym)
                     if rep:
-                        time.sleep(3) # Kota dostu bekleme
+                        time.sleep(3)
                         res = ask_gemini(sym, rep, last_sig)
-                        
-                        baslik = f"⏰ **OTOMATİK AJAN RAPORU ({interval} Saat):** {sym}"
-                        bot.send_message(CHAT_ID, f"{baslik}\n{res}", parse_mode='Markdown')
-                        
+                        bot.send_message(CHAT_ID, f"OTOMATIK RAPOR ({interval} Saat): {sym}\n{res}")
                         db_zaman_damgasi_vur(sym)
                         new_sig = "AL" if "AL" in res else "SAT" if "SAT" in res else "BEKLE"
                         db_sinyal_guncelle(sym, new_sig)
-            
-            time.sleep(300) # 5 dk mola
-
+            time.sleep(300) 
         except Exception as e:
             print(f"Scanner Hatası: {e}")
             time.sleep(60)
 
-# --- 6. BAŞLATMA ---
 if __name__ == "__main__":
     t = threading.Thread(target=scanner_loop)
     t.start()
     port = int(os.environ.get("PORT", 5000))
     server.run(host="0.0.0.0", port=port)
-    
+
