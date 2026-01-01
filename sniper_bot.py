@@ -22,7 +22,7 @@ HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
 # Yapay Zeka ve Borsa Kurulumu
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash') # En stabil ve ücretsiz kotası bol model
+model = genai.GenerativeModel('gemini-2.5-flash') # En stabil ve ücretsiz kotası bol model
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
 
@@ -180,8 +180,7 @@ def webhook():
     bot.remove_webhook()
     bot.set_webhook(url=HEROKU_APP_URL + BOT_TOKEN)
     return "<h1>VEDAT PASA KOZMIK ODASI AKTIF!</h1>", 200
-
-# AKILLI SOHBET VE EMİR YAKALAYICI
+# AKILLI SOHBET, EMİR VE İPTAL MODÜLÜ
 @bot.message_handler(func=lambda message: True)
 def sohbet_et(message):
     try:
@@ -195,37 +194,40 @@ def sohbet_et(message):
                 bulunan_coin = coin
                 break
         
-        # 2. ZAMAN AYARLAMA EMRİ (Örn: "AAVE 3 SAAT")
-        saat_tespiti = re.search(r'(\d+)\s*(SAAT)', text)
-        
-        if bulunan_coin and saat_tespiti:
-            yeni_saat = int(saat_tespiti.group(1))
+        if bulunan_coin:
             symbol = f"{bulunan_coin}/USDT"
-            
-            db_coin_ekle(symbol) # Garanti olsun diye ekle
-            if db_saat_guncelle(symbol, yeni_saat):
-                bot.reply_to(message, f"✅ Anlaşıldı Vedat Bey! **{symbol}** artık her **{yeni_saat} saatte bir** detaylı raporlanacak.")
-            else:
-                bot.reply_to(message, "❌ Ayar yapılamadı.")
-            return
 
-        # 3. ANLIK ANALİZ İSTEĞİ
-        tetikleyiciler = ["ANALIZ", "DURUM", "NE OLUR", "YORUMLA", "BAK", "RAPOR", "TAKIP", "IZLE", "FIYAT"]
-        if bulunan_coin and any(x in text for x in tetikleyiciler):
-            bot.reply_to(message, f"🔎 {bulunan_coin} dosyaları inceleniyor, bekleyiniz...")
-            symbol = f"{bulunan_coin}/USDT"
-            report, price = get_full_report(symbol)
-            if report:
-                yorum = ask_gemini(symbol, report, "Bilinmiyor")
-                bot.send_message(message.chat.id, f"📊 **{symbol} ANLIK DURUM RAPORU:**\n\n{yorum}", parse_mode='Markdown')
-            else:
-                bot.reply_to(message, "❌ Piyasa verisine ulaşılamadı.")
-            return
+            # --- A. İPTAL / SİLME EMRİ (YENİ ÖZELLİK) ---
+            iptal_kelimeleri = ["SIL", "IPTAL", "BIRAK", "YETER", "KALDIR", "SUS"]
+            if any(x in text for x in iptal_kelimeleri):
+                db_coin_cikar(symbol)
+                bot.reply_to(message, f"❌ Emredersiniz! **{bulunan_coin}** takibi sonlandırıldı. Artık rapor vermeyeceğim.")
+                return # Buradan çık, başka işlem yapma
+
+            # --- B. ZAMAN AYARLAMA EMRİ (Örn: "AAVE 3 SAAT") ---
+            saat_tespiti = re.search(r'(\d+)\s*(SAAT)', text)
+            if saat_tespiti:
+                yeni_saat = int(saat_tespiti.group(1))
+                db_coin_ekle(symbol) # Listede yoksa ekle
+                if db_saat_guncelle(symbol, yeni_saat):
+                    bot.reply_to(message, f"✅ Anlaşıldı Vedat Bey! **{symbol}** artık her **{yeni_saat} saatte bir** detaylı raporlanacak.")
+                return
+
+            # --- C. ANLIK ANALİZ İSTEĞİ ---
+            analiz_kelimeleri = ["ANALIZ", "DURUM", "NE OLUR", "YORUMLA", "BAK", "RAPOR", "TAKIP", "IZLE", "FIYAT"]
+            if any(x in text for x in analiz_kelimeleri):
+                bot.reply_to(message, f"🔎 {bulunan_coin} dosyaları inceleniyor, bekleyiniz...")
+                report, price = get_full_report(symbol)
+                if report:
+                    yorum = ask_gemini(symbol, report, "Bilinmiyor")
+                    bot.send_message(message.chat.id, f"📊 **{symbol} ANLIK DURUM RAPORU:**\n\n{yorum}", parse_mode='Markdown')
+                else:
+                    bot.reply_to(message, "❌ Piyasa verisine ulaşılamadı.")
+                return
 
         # 4. NORMAL SOHBET (Yatırım Danışmanı)
         if message.text.startswith('/'): return
         
-        # Standart komutlar harici sohbet
         prompt = (f"Sen Vedat Bey'in 'Özel Finans Danışmanısın'. "
                   f"Kullanıcı sana şunu dedi: '{message.text}'. "
                   f"Rolüne sadık kal, kısa, zeki ve profesyonel cevap ver. Asla AI olduğunu söyleme.")
@@ -235,6 +237,8 @@ def sohbet_et(message):
         
     except Exception as e:
         print(f"Sohbet Hatası: {e}")
+
+
 
 # Standart Komutlar
 @bot.message_handler(commands=['takip'])
