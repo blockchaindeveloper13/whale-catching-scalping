@@ -193,6 +193,31 @@ def komut_analiz(m):
             bot.send_message(CHAT_ID, f"🧠 {sym} ANALİZİ:\n{res}")
     except: pass
 
+# --- GENEL SOHBET MODÜLÜ (HER ŞEYE CEVAP VERİR) ---
+@bot.message_handler(func=lambda message: True)
+def sohbet_et(message):
+    try:
+        user_input = message.text
+        
+        # Eğer mesaj bir komutsa (/ ile başlıyorsa) bu fonksiyonu pas geç
+        if user_input.startswith('/'): return
+
+        # Komutan Rolü İçin Prompt
+        prompt = (f"Sen Vedat Paşa'sın. Sert, disiplinli ama ekibini seven bir Türk komutanısın. "
+                  f"Kullanıcı sana şunu yazdı: '{user_input}'. "
+                  f"Ona bu role uygun, kısa, askerlik veya piyasa jargonuyla cevap ver. "
+                  f"Asla yapay zeka olduğunu söyleme, rolden çıkma.")
+        
+        # Gemini'ye gönder
+        response = model.generate_content(prompt)
+        
+        # Cevabı Telegram'a ilet
+        bot.reply_to(message, response.text)
+        
+    except Exception as e:
+        print(f"Sohbet Hatası: {e}")
+        
+
 # --- ARKA PLAN TARAYICI (SCANNER) ---
 def scanner_loop():
     while True:
