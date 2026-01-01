@@ -22,7 +22,7 @@ HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
 # Yapay Zeka Kurulumu (En stabil ve ücretsiz kotası bol model)
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash') 
+model = genai.GenerativeModel('gemini-2.5-flash') 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
