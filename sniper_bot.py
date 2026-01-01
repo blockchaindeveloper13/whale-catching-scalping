@@ -193,29 +193,53 @@ def komut_analiz(m):
             bot.send_message(CHAT_ID, f"🧠 {sym} ANALİZİ:\n{res}")
     except: pass
 
-# --- GENEL SOHBET MODÜLÜ (HER ŞEYE CEVAP VERİR) ---
+# --- AKILLI SOHBET VE ANALİZ MODÜLÜ ---
 @bot.message_handler(func=lambda message: True)
 def sohbet_et(message):
     try:
-        user_input = message.text
+        text = message.text.upper() # Mesajı büyük harfe çevir
         
-        # Eğer mesaj bir komutsa (/ ile başlıyorsa) bu fonksiyonu pas geç
-        if user_input.startswith('/'): return
+        # 1. EĞER CÜMLEDE ANALİZ EMRİ VARSA (GİZLİ KOMUT)
+        # Paşam buraya senin portföyündeki coinleri ekledim
+        COINLER = ["BTC", "ETH", "SOL", "AAVE", "LTC", "LINK", "AVAX", "XLM", "SUI", "BCH"]
+        
+        bulunan_coin = None
+        for coin in COINLER:
+            if coin in text: # Mesela "AAVE ne olur?" cümlesinde AAVE var mı?
+                bulunan_coin = coin
+                break
+        
+        # Eğer hem coin ismi var, hem de analiz isteği varsa
+        tetikleyiciler = ["ANALIZ", "DURUM", "NE OLUR", "YORUMLA", "BAK", "RAPOR"]
+        if bulunan_coin and any(x in text for x in tetikleyiciler):
+            
+            bot.reply_to(message, f"🫡 Emredersiniz Paşam! {bulunan_coin} cephesine derhal bağlanıyorum...")
+            
+            # Tıpkı /analiz komutu gibi gerçek veriyi çekiyoruz
+            symbol = f"{bulunan_coin}/USDT"
+            report, price = get_full_report(symbol)
+            
+            if report:
+                # Gemini'ye veriyi yorumlat
+                yorum = ask_gemini(symbol, report, "Bilinmiyor")
+                bot.send_message(message.chat.id, f"🧠 **{symbol} İSTİHBARATI:**\n\n{yorum}", parse_mode='Markdown')
+            else:
+                bot.reply_to(message, "❌ Veri alınamadı Komutanım.")
+            return # Fonksiyonu burada bitir, aşağıya (sohbete) geçmesin
 
-        # Komutan Rolü İçin Prompt
-        prompt = (f"Sen Vedat Paşa'sın. Sert, disiplinli ama ekibini seven bir Türk komutanısın. "
-                  f"Kullanıcı sana şunu yazdı: '{user_input}'. "
-                  f"Ona bu role uygun, kısa, askerlik veya piyasa jargonuyla cevap ver. "
-                  f"Asla yapay zeka olduğunu söyleme, rolden çıkma.")
+        # 2. EĞER ANALİZ EMRİ YOKSA NORMAL SOHBET ET (GEYİK YAP)
+        if message.text.startswith('/'): return
+
+        prompt = (f"Sen Vedat Paşa'sın. Sert, disiplinli, hafif argolu konuşan Türk Komutanısın. "
+                  f"Kullanıcı sana şunu dedi: '{message.text}'. "
+                  f"Buna rolüne uygun kısa cevap ver. Asla yapay zeka olduğunu söyleme.")
         
-        # Gemini'ye gönder
         response = model.generate_content(prompt)
-        
-        # Cevabı Telegram'a ilet
         bot.reply_to(message, response.text)
         
     except Exception as e:
         print(f"Sohbet Hatası: {e}")
+        
         
 
 # --- ARKA PLAN TARAYICI (SCANNER) ---
