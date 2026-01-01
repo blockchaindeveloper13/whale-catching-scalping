@@ -272,18 +272,39 @@ def sohbet_et(message):
                     bot.reply_to(message, "Paşam, borsadan veri alamıyorum. Bağlantıyı kontrol edelim.")
                 return
             
-            # 5. HAFIZADAN KONUŞMA (KURMAY MODU)
+                        # 5. HAFIZADAN KONUŞMA (KURMAY ZEKASI - GERÇEKÇİ MOD)
+            # Önce veritabanına bağlanıp veriyi çekiyoruz (Okuyamıyor şüphen kalmasın diye)
             row = db_islem_yap("SELECT last_analysis FROM watchlist WHERE symbol = %s", (symbol,))
+            
+            # Eğer veritabanında kayıt varsa:
             if row and row[0] and row[0][0]:
-                eski_analiz = row[0][0]
-                prompt = (f"Sen Vedat Paşa'nın Finans Kurmayısın. Paşan soruyor: '{message.text}'\n"
-                          f"SENİN SON RAPORUN ({symbol}):\n'{eski_analiz}'\n\n"
-                          f"GÖREV: Eski raporunu hatırla. 'Paşam' diye hitap et. Fiyatları ve stratejiyi net anlat. Yıldız kullanma.")
+                eski_analiz = row[0][0] # İşte burası! Veriyi gerçekten okuduğu an.
                 
-                raw_res = model.generate_content(prompt).text
-                clean_res = raw_res.replace("**", "").replace("__", "")
-                bot.reply_to(message, clean_res)
+                # Şimdi yapay zekaya "YALAKALIK YAPMA" emri veriyoruz:
+                prompt = (f"Sen Vedat Paşa'nın Finansal Kurmayısın.\n"
+                          f"GÖREVİN: Aşağıdaki 'GERÇEK RAPOR' verisine sadık kalarak Paşanın sorusunu cevapla.\n"
+                          f"⚠️ KRİTİK KURAL: Paşa (Kullanıcı) yanlış bir rakam söylerse (örneğin raporda olmayan '15' gibi), ona uyum sağlama! "
+                          f"Kibarca 'Paşam raporda o rakam yok, doğrusu şudur' diyerek DÜZELT.\n\n"
+                          f"📂 GERÇEK RAPOR VERİSİ ({symbol}):\n"
+                          f"--------------------------------------------------\n"
+                          f"{eski_analiz}\n"
+                          f"--------------------------------------------------\n\n"
+                          f"PAŞANIN SORUSU: '{message.text}'\n"
+                          f"CEVAP: Rapor dışına çıkmadan, verilerle konuş ve yorumla.")
+                
+                try:
+                    raw_res = model.generate_content(prompt).text
+                    clean_res = raw_res.replace("**", "").replace("__", "")
+                    bot.reply_to(message, clean_res)
+                except: 
+                    bot.reply_to(message, "Paşam raporu yorumlarken teknik bir aksaklık oldu.")
                 return
+            
+            # Eğer veritabanında veri yoksa dürüstçe söylesin:
+            else:
+                bot.reply_to(message, f"Paşam, {symbol} için henüz bir istihbarat raporu kaydetmemişiz. Önce 'ANALİZ' emri verin ki cepheyi inceleyeyim.")
+                return
+                
 
         # --- C. NORMAL SOHBET (YAVER MODU) ---
         if message.text.startswith('/'): return
