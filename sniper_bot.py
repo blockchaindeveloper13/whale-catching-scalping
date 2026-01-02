@@ -344,60 +344,79 @@ def komut_liste(m):
         msg += f"🔹 {sym}: {interval}s. Sinyal: {last_sig}{target_msg}\n"
     bot.reply_to(m, msg)
 
-# --- 5. ALARM VE TARAMA DÖNGÜSÜ ---
+# --- 5. ALARM VE TARAMA DÖNGÜSÜ (EKONOMİK MOD) ---
 def scanner_loop():
-    print("Nöbetçi Gözetleme Kulesinde...")
+    print("💤 Nöbetçi Kulesi: EKONOMİK MOD (15 Dk Arayla Tarama)...")
     while True:
         try:
+            # Veritabanını kontrol et
             rows = db_islem_yap("SELECT symbol, last_signal, interval_hours, last_report_time, target_price FROM watchlist")
+            
+            # Eğer takip listesi boşsa, sistemi yorma, 15 dk uyu
             if not rows: 
-                time.sleep(60)
+                print("Liste boş, asker istirahatte...")
+                time.sleep(900) 
                 continue
                 
             now = datetime.now()
             
             for r in rows:
                 sym, last_sig, interval, last_time, target_price = r
-                if interval is None: interval = 4
+                if interval is None: interval = 4 # Varsayılan 4 saat
                 
-                # FİYAT KONTROLÜ (Alarm İçin)
+                # --- A. FİYAT ALARMI KONTROLÜ ---
+                # Her döngüde fiyatı Binance'den soruyoruz (Bu ücretsizdir)
                 try:
                     ticker = exchange.fetch_ticker(sym)
                     current_price = ticker['last']
                     
-                    # Alarm Mantığı: Hedefe ulaşıldı mı?
+                    # Eğer bir HEDEF fiyat belirlenmişse kontrol et
                     if target_price and target_price > 0:
-                        # Basit mantık: Fiyat hedefe %0.5 yaklaştıysa veya geçtiyse
+                        # Fiyat hedefe geldiyse veya geçtiyse
+                        # Mantık: Hedefin altına mı indi (Short) yoksa üstüne mi çıktı (Long) ayırt etmeden
+                        # Sadece "Rakam oraya değdi mi" diye bakıyoruz.
                         fark = abs(current_price - target_price)
                         yuzde_fark = (fark / target_price) * 100
                         
-                        if yuzde_fark < 0.5 or (current_price >= target_price): 
+                        # %0.5 tolerans ile yakalarsa haber versin
+                        if yuzde_fark < 0.5: 
                             bot.send_message(CHAT_ID, f"🚨 **KIRMIZI ALARM PAŞAM!**\n\n{sym} Hedef Menziline Girdi!\nAnlık Fiyat: {current_price}\nHedef: {target_price}")
-                            # Alarmı kapa
+                            # Alarmı tekrar çalmaması için veritabanından siliyoruz (0 yapıyoruz)
                             db_islem_yap("UPDATE watchlist SET target_price = 0 WHERE symbol = %s", (sym,))
-                except: pass
+                except Exception as e:
+                    print(f"Fiyat alma hatası ({sym}): {e}")
 
-                # RAPOR ZAMANI
+                # --- B. RAPOR ZAMANI GELDİ Mİ? ---
                 gecen_sure = 0
                 if last_time:
                     diff = now - last_time
-                    gecen_sure = diff.total_seconds() / 3600
+                    gecen_sure = diff.total_seconds() / 3600 # Saate çevir
                 else: gecen_sure = 999 
 
+                # Eğer belirlenen saat (örn: 4 saat) dolduysa Analiz yap (Maliyetli kısım burası)
                 if gecen_sure >= interval:
                     rep, prc = get_full_report(sym)
                     if rep:
-                        time.sleep(3)
+                        # Sisteme yüklenmemek için analiz öncesi 2 sn nefes al
+                        time.sleep(2)
                         res = ask_gemini(sym, rep, last_sig)
+                        
                         # Kayıt
                         new_sig = "AL" if "AL" in res else "SAT" if "SAT" in res else "BEKLE"
                         db_islem_yap("UPDATE watchlist SET last_signal = %s, last_analysis = %s, last_report_time = NOW() WHERE symbol = %s", (new_sig, res, sym))
-                        bot.send_message(CHAT_ID, f"⏰ OTOMATİK RAPOR: {sym}\n{res}")
+                        
+                        bot.send_message(CHAT_ID, f"⏰ OTOMATİK DEVRIYE RAPORU: {sym}\n{res}")
             
-            time.sleep(60) 
+            # --- KRİTİK DEĞİŞİKLİK BURADA ---
+            # Eskiden 60 saniyeydi, şimdi 900 saniye (15 Dakika) yaptık.
+            print("Tur tamamlandı. Asker 15 dakika dinlenmeye çekiliyor...")
+            time.sleep(900) 
+            
         except Exception as e:
             print(f"Scanner Hatası: {e}")
-            time.sleep(60)
+            # Hata olsa bile 15 dk bekle ki log dosyası şişmesin
+            time.sleep(900)
+                
 
 if __name__ == "__main__":
     t = threading.Thread(target=scanner_loop)
