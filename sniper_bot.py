@@ -21,7 +21,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash') 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
@@ -67,39 +67,87 @@ try:
     conn.close()
 except: pass
 
-# --- ANALİZ ---
+# --- TAM TEŞEKKÜLLÜ ANALİZ (HACİM DAHİL) ---
 def get_technical_data(symbol):
     try:
-        # Sembolü zorla düzelt (AAVE -> AAVE/USDT)
         if "/" not in symbol: symbol += "/USDT"
         
         ticker = exchange.fetch_ticker(symbol)
         price = ticker['last']
-        report = f"Anlık Fiyat: {price}\n"
         
-        bars = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=30)
+        # 100 Mum çek (OBV ve Hacim Ortalaması için)
+        bars = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
+        # --- 1. HACİM ANALİZİ (YENİ EKLENDİ) ---
+        last_volume = df['volume'].iloc[-1]
+        avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
+        vol_change = ((last_volume - avg_volume) / avg_volume) * 100
+        
+        # OBV Hesapla (Para Giriş/Çıkış Göstergesi)
+        df['obv'] = (pd.Series(np.where(df['close'] > df['close'].shift(1), df['volume'], 
+                       np.where(df['close'] < df['close'].shift(1), -df['volume'], 0))).cumsum())
+        
+        obv_trend = "POZİTİF (Para Girişi)" if df['obv'].iloc[-1] > df['obv'].iloc[-5] else "NEGATİF (Para Çıkışı)"
+        
+        hacim_durumu = ""
+        if vol_change > 50: hacim_durumu = "🔥 ÇOK YÜKSEK (Patlama)"
+        elif vol_change > 0: hacim_durumu = "YÜKSEK (Ortalama Üstü)"
+        else: hacim_durumu = "DÜŞÜK (İlgi Yok)"
+
+        # --- 2. TEKNİK İNDİKATÖRLER ---
+        # RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        report += f"RSI (1S): {rsi.iloc[-1]:.1f}\n"
+        # MACD
+        exp1 = df['close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['close'].ewm(span=26, adjust=False).mean()
+        macd = exp1 - exp2
+        signal = macd.ewm(span=9, adjust=False).mean()
+        
+        # Bollinger
+        sma20 = df['close'].rolling(window=20).mean()
+        std = df['close'].rolling(window=20).std()
+        upper_bb = sma20 + (std * 2)
+        lower_bb = sma20 - (std * 2)
+        
+        # EMA Trend
+        ema50 = df['close'].ewm(span=50, adjust=False).mean()
+
+        # Trend Yorumu
+        trend = "YÜKSELİŞ" if price > ema50.iloc[-1] else "DÜŞÜŞ"
+        
+        report = (f"FİYAT: {price}\n"
+                  f"--- HACİM İSTİHBARATI ---\n"
+                  f"1. HACİM GÜCÜ: {hacim_durumu} (Ortalamaya göre %{vol_change:.1f})\n"
+                  f"2. PARA AKIŞI (OBV): {obv_trend}\n"
+                  f"   (Fiyat düşerken OBV artıyorsa topluyorlardır!)\n"
+                  f"--- TEKNİK DURUM ---\n"
+                  f"3. TREND (EMA50): {trend}\n"
+                  f"4. RSI: {rsi.iloc[-1]:.1f}\n"
+                  f"5. MACD: {'AL' if macd.iloc[-1] > signal.iloc[-1] else 'SAT'} Sinyali\n"
+                  f"6. BANTLAR: {lower_bb.iloc[-1]:.2f} - {upper_bb.iloc[-1]:.2f}")
+        
         return report, price
-    except Exception as e: 
-        print(f"Veri Hatası ({symbol}): {e}")
-        return None, 0
+    except Exception as e: return None, 0
+
+import numpy as np # OBV için gerekli
 
 def ask_gemini(symbol, data):
     try:
-        prompt = (f"Askeri Rapor. Coin: {symbol}. Veri:\n{data}\n"
-                  f"Kısa Özet: [AL/SAT/BEKLE] - [Gerekçe]")
+        # Prompt'u HACİM ODAKLI yaptık
+        prompt = (f"GÖREV: Finansal İstihbarat. Coin: {symbol}.\n"
+                  f"VERİLER:\n{data}\n"
+                  f"EMİR: Bu verileri yorumla. Özellikle HACİM ve FİYAT uyumlu mu ona bak.\n"
+                  f"Balon mu, gerçek yükseliş mi söyle. Kararını ver (AL/SAT/BEKLE).")
         return model.generate_content(prompt).text.replace("**", "")
-    except: return "İstihbarat sunucusu cevap vermiyor."
+    except Exception as e: return f"⚠️ İstihbarat Hatası: {e}"
 
-# --- FLASK ---
+# --- FLASK VE MESAJLAŞMA (AYNI) ---
 @server.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
     bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
@@ -111,127 +159,66 @@ def webhook():
     bot.set_webhook(url=HEROKU_APP_URL + BOT_TOKEN)
     return "ONLINE", 200
 
-# --- MESAJ YÖNETİMİ (BEYİN) ---
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
-    text = m.text.upper() # Her şeyi büyük harfe çevir
-    
-    # 1. COIN ADINI BUL
-    # Basit mantık: İçinde "/" geçen veya kelime listesinde olan (Basitleştirildi)
+    text = m.text.upper()
     words = text.split()
     found_coin = None
-    
-    # Yaygın coinleri manuel tanıtalım ki garanti olsun
-    COMMON_COINS = ["BTC", "ETH", "SOL", "AAVE", "AVAX", "XRP", "LTC", "LINK", "DOGE", "SHIB", "PEPE", "ARB", "OP", "SUI"]
+    COMMON = ["BTC", "ETH", "SOL", "AAVE", "AVAX", "XRP", "LTC", "LINK", "DOGE", "SHIB"]
     
     for w in words:
-        clean_w = w.strip(".,!?")
-        if clean_w in COMMON_COINS or (len(clean_w) > 2 and clean_w.isalpha() and clean_w not in ["HER", "DAKIKA", "SAAT", "ANALIZ", "DOLAR", "OLUNCA", "HABER"]):
-            found_coin = clean_w
+        clean = w.strip(".,!?")
+        if clean in COMMON or (len(clean) > 2 and clean.isalpha() and clean not in ["HER", "DAKIKA", "SAAT", "ANALIZ"]):
+            found_coin = clean
             break
             
     if found_coin:
         symbol = f"{found_coin}/USDT"
 
-        # A) ZAMAN AYARI ("Her dakika", "15 dk", "Her saat")
-        # Regex: "HER" kelimesini veya Sayıları yakalar
         zaman_match = re.search(r'(HER|\d+)\s*(SAAT|DK|DAKIKA|DAK)', text)
-        
         if zaman_match:
-            miktar_str = zaman_match.group(1)
+            miktar = zaman_match.group(1)
             birim = zaman_match.group(2)
-            
-            # "HER" dediyse 1 demektir
-            sure = 1 if miktar_str == "HER" else int(miktar_str)
-            
-            # Interval hesapla (Veritabanı SAAT tutar)
-            # Eğer dakika ise 60'a böl.
+            sure = 1 if miktar == "HER" else int(miktar)
             interval = sure / 60.0 if "DK" in birim or "DAK" in birim else float(sure)
             
             db_islem("INSERT INTO watchlist (symbol, interval_hours) VALUES (%s, %s) ON CONFLICT (symbol) DO UPDATE SET interval_hours = %s", (symbol, interval, interval))
+            bot.reply_to(m, f"✅ {found_coin} nöbeti başladı. Hacim dahil rapor vereceğim.")
             
-            # Cevap ver
-            msg_sure = f"{sure} DAKİKA" if interval < 1 else f"{sure} SAAT"
-            bot.reply_to(m, f"✅ {found_coin} nöbeti güncellendi: {msg_sure} aralıkla rapor vereceğim.")
-            
-            # "Her dakika" gibi agresif bir şeyse hemen bir analiz patlat ki çalıştığını görsün
-            if interval <= 0.05: # 3 dakikadan azsa
-                bot.send_message(m.chat.id, f"🚀 Hızlı mod testi başlatılıyor...")
+            if interval <= 0.05:
                 data, prc = get_technical_data(symbol)
-                if data:
-                    res = ask_gemini(symbol, data)
-                    bot.send_message(m.chat.id, res)
+                if data: bot.send_message(m.chat.id, ask_gemini(symbol, data))
             return
 
-        # B) HEDEF FİYAT AYARI ("170 Dolar", "170 olursa", "Hedef 170")
-        # Regex: Sayıyı yakala, yanında DOLAR, OLUNCA, OLURSA, HEDEF var mı bak
-        hedef_match = re.search(r'(\d+(\.\d+)?)\s*(DOLAR|USDT|OLUNCA|OLURSA|HEDEF|FIYAT)', text)
-        # Veya tersten: "HEDEF 170"
-        hedef_match_2 = re.search(r'(HEDEF|FIYAT)\s*(\d+(\.\d+)?)', text)
-        
-        final_hedef = None
-        if hedef_match: final_hedef = float(hedef_match.group(1))
-        elif hedef_match_2: final_hedef = float(hedef_match_2.group(2))
-        
-        if final_hedef:
-            db_islem("INSERT INTO watchlist (symbol, target_price, near_target) VALUES (%s, %s, FALSE) ON CONFLICT (symbol) DO UPDATE SET target_price = %s, near_target = FALSE", (symbol, final_hedef, final_hedef))
-            bot.reply_to(m, f"🎯 {found_coin} için HEDEF KİLİTLENDİ: {final_hedef} USDT.\nOraya gelince haber vereceğim Paşam.")
-            return
-
-        # C) MANUEL SORGULAMA ("Analiz", "Durum", "Nedir")
-        # Yukarıdakiler yoksa ve analiz istiyorsa
-        if "ANALIZ" in text or "DURUM" in text or "NEDIR" in text:
-            bot.reply_to(m, f"🔎 {found_coin} inceleniyor...")
+        if "ANALIZ" in text:
+            bot.reply_to(m, f"🔎 {found_coin} hacim analizi yapılıyor...")
             data, prc = get_technical_data(symbol)
-            if data:
-                res = ask_gemini(symbol, data)
-                bot.send_message(m.chat.id, res)
-            else:
-                bot.reply_to(m, "⚠️ İstihbarat alınamadı. Coin ismini doğru yazdığından emin ol Paşam.")
+            if data: bot.send_message(m.chat.id, ask_gemini(symbol, data))
             return
 
-    # Coin bulunamadıysa ve komut değilse normal sohbet
     if not m.text.startswith("/"):
         try:
             res = model.generate_content(f"Sen askersin. Kullanıcı: {m.text}. Kısa cevap ver.").text
             bot.reply_to(m, res.replace("**", ""))
         except: pass
 
-# --- NÖBETÇİ KULESİ ---
 def watch_tower():
     print("Nöbetçi Kulesi Devrede.")
+    try: bot.send_message(CHAT_ID, "📢 KOMUTANIM, HACİM RADARI AKTİF! 🫡")
+    except: pass
     last_ping = time.time()
     
     while True:
         try:
-            # PING (Her 20 dk)
             if time.time() - last_ping > 1200:
                 if HEROKU_APP_URL: requests.get(HEROKU_APP_URL)
                 last_ping = time.time()
 
-            # TARAMA (Her 60 Saniye)
             rows = db_islem("SELECT symbol, interval_hours, last_report_time, target_price, near_target FROM watchlist")
             if rows:
                 now = datetime.now()
                 for r in rows:
                     sym, interval, last_time, target, near_flag = r
-                    
-                    # 1. FİYAT KONTROL
-                    try:
-                        ticker = exchange.fetch_ticker(sym)
-                        price = ticker['last']
-                        
-                        if target and target > 0:
-                            diff = abs(price - target) / target * 100
-                            if diff < 0.2: # %0.2 vurdu say
-                                bot.send_message(CHAT_ID, f"🚨 HEDEF VURULDU PAŞAM!\n{sym}: {price}\nHedef: {target}")
-                                db_islem("UPDATE watchlist SET target_price = 0 WHERE symbol = %s", (sym,))
-                            elif diff < 1.0 and not near_flag:
-                                bot.send_message(CHAT_ID, f"⚠️ {sym} hedefe yaklaştı ({price})!")
-                                db_islem("UPDATE watchlist SET near_target = TRUE WHERE symbol = %s", (sym,))
-                    except: pass
-                    
-                    # 2. ZAMANLI RAPOR
                     if interval:
                         gecen = (now - last_time).total_seconds() / 3600 if last_time else 999
                         if gecen >= interval:
@@ -239,11 +226,12 @@ def watch_tower():
                             if data:
                                 res = ask_gemini(sym, data)
                                 db_islem("UPDATE watchlist SET last_report_time = NOW() WHERE symbol = %s", (sym,))
-                                bot.send_message(CHAT_ID, f"⏰ {sym} RAPORU:\n{res}")
-                                time.sleep(1)
-
-            time.sleep(60)
-        except: time.sleep(60)
+                                bot.send_message(CHAT_ID, f"⏰ {sym} DETAYLI RAPOR:\n{res}")
+                                time.sleep(2)
+            time.sleep(20)
+        except Exception as e:
+            print(f"Hata: {e}")
+            time.sleep(20)
 
 if __name__ == "__main__":
     t = threading.Thread(target=watch_tower)
