@@ -28,7 +28,7 @@ HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
 # --- MODEL SEÇİMİ (KESİN OLARAK PRO - EN ZEKİSİ) ---
 genai.configure(api_key=GEMINI_API_KEY)
-model_name = 'gemini-1.5-pro' # Analiz derinliği için şart
+model_name = 'gemini-2.5-flash' # Analiz derinliği için şart
 model = genai.GenerativeModel(model_name)
 
 bot = telebot.TeleBot(BOT_TOKEN)
