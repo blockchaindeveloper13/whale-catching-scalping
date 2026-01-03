@@ -23,12 +23,14 @@ HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
 # --- MODEL AYARI ---
 genai.configure(api_key=GEMINI_API_KEY)
+# Model Avcısı: Hangisi çalışırsa onu kapar
 try:
-    # Komutanın emriyle 2.5 (veya en yeni hangisiyse)
     model = genai.GenerativeModel('gemini-2.5-flash')
+    model.generate_content("Test")
 except:
     try:
         model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        model.generate_content("Test")
     except:
         model = genai.GenerativeModel('gemini-1.5-flash')
 
@@ -41,7 +43,7 @@ exchange = ccxt.binance({
     'enableRateLimit': True
 })
 
-# --- VERİTABANI ---
+# --- VERİTABANI BAĞLANTISI ---
 def db_baglan():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -57,39 +59,51 @@ def db_islem(sql, params=None):
         conn.close()
         return res
     except Exception as e:
-        print(f"DB Hatası: {e}")
+        print(f"DB İşlem Hatası: {e}")
         return None
 
-# --- TABLO TADİLATI (BURASI ÇOK ÖNEMLİ) ---
-try:
-    conn = db_baglan()
-    cur = conn.cursor()
-    
-    # 1. Tablo yoksa oluştur
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS watchlist (
-            symbol VARCHAR(20) PRIMARY KEY,
-            last_signal VARCHAR(50) DEFAULT 'YOK',
-            interval_hours REAL DEFAULT 4,
-            last_report_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            target_price REAL DEFAULT 0,
-            near_target BOOLEAN DEFAULT FALSE
-        )
-    """)
-    
-    # 2. TADİLAT: Eksik sütunları sonradan ekle (Eski tablolar için)
-    # Hata verirse (zaten varsa) pass geçecek.
-    try: cur.execute("ALTER TABLE watchlist ADD COLUMN target_price REAL DEFAULT 0")
-    except: pass
-    
-    try: cur.execute("ALTER TABLE watchlist ADD COLUMN near_target BOOLEAN DEFAULT FALSE")
-    except: pass
-    
-    conn.commit()
-    conn.close()
-    print("✅ Veritabanı tadilatı tamamlandı.")
-except Exception as e:
-    print(f"Tablo kurulum hatası: {e}")
+# --- KRİTİK BÖLÜM: VERİTABANI TADİLATI (ZORLAMA) ---
+def db_baslat():
+    print("🛠️ VERİTABANI TADİLATI BAŞLIYOR...")
+    try:
+        conn = db_baglan()
+        cur = conn.cursor()
+        
+        # 1. Tabloyu oluştur (Yoksa)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                symbol VARCHAR(20) PRIMARY KEY,
+                last_signal VARCHAR(50) DEFAULT 'YOK',
+                interval_hours REAL DEFAULT 4,
+                last_report_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                target_price REAL DEFAULT 0,
+                near_target BOOLEAN DEFAULT FALSE
+            )
+        """)
+        conn.commit()
+        
+        # 2. Sütunları ZORLA ekle (Eğer yoksa ekler, varsa hata vermez)
+        # Postgres'te 'IF NOT EXISTS' kullanımı:
+        try:
+            cur.execute("ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS target_price REAL DEFAULT 0;")
+            conn.commit()
+            print("✅ target_price sütunu kontrol edildi.")
+        except Exception as e: print(f"Sütun 1 Hatası: {e}")
+
+        try:
+            cur.execute("ALTER TABLE watchlist ADD COLUMN IF NOT EXISTS near_target BOOLEAN DEFAULT FALSE;")
+            conn.commit()
+            print("✅ near_target sütunu kontrol edildi.")
+        except Exception as e: print(f"Sütun 2 Hatası: {e}")
+        
+        cur.close()
+        conn.close()
+        print("🏁 VERİTABANI HAZIR!")
+    except Exception as e:
+        print(f"🔥 KRİTİK DB BAŞLATMA HATASI: {e}")
+
+# KOD ÇALIŞIR ÇALIŞMAZ TADİLATI YAP
+db_baslat()
 
 # --- TAM TEŞEKKÜLLÜ ANALİZ ---
 def get_technical_data(symbol):
@@ -111,45 +125,41 @@ def get_technical_data(symbol):
         df['obv'] = (pd.Series(np.where(df['close'] > df['close'].shift(1), df['volume'], 
                        np.where(df['close'] < df['close'].shift(1), -df['volume'], 0))).cumsum())
         
-        obv_trend = "POZİTİF (Para Girişi)" if df['obv'].iloc[-1] > df['obv'].iloc[-5] else "NEGATİF (Para Çıkışı)"
+        obv_trend = "POZİTİF (Giriş)" if df['obv'].iloc[-1] > df['obv'].iloc[-5] else "NEGATİF (Çıkış)"
         
         hacim_durumu = ""
-        if vol_change > 50: hacim_durumu = "🔥 PATLAMA (Çok Yüksek)"
-        elif vol_change > 0: hacim_durumu = "GÜÇLÜ (Ortalama Üstü)"
+        if vol_change > 50: hacim_durumu = "🔥 PATLAMA"
+        elif vol_change > 0: hacim_durumu = "GÜÇLÜ"
         else: hacim_durumu = "ZAYIF"
 
         # 2. TEKNİK
-        # RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        # MACD
         exp1 = df['close'].ewm(span=12, adjust=False).mean()
         exp2 = df['close'].ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
         
-        # Bollinger
         sma20 = df['close'].rolling(window=20).mean()
         std = df['close'].rolling(window=20).std()
         upper_bb = sma20 + (std * 2)
         lower_bb = sma20 - (std * 2)
         
-        # EMA
         ema50 = df['close'].ewm(span=50, adjust=False).mean()
         trend = "YÜKSELİŞ" if price > ema50.iloc[-1] else "DÜŞÜŞ"
         
         report = (f"FİYAT: {price}\n"
-                  f"--- HACİM İSTİHBARATI ---\n"
-                  f"1. HACİM: {hacim_durumu} (Değişim: %{vol_change:.1f})\n"
-                  f"2. PARA AKIŞI (OBV): {obv_trend}\n"
-                  f"--- TEKNİK DURUM ---\n"
-                  f"3. TREND (EMA50): {trend}\n"
+                  f"--- HACİM ---\n"
+                  f"1. GÜÇ: {hacim_durumu} (%{vol_change:.1f})\n"
+                  f"2. PARA AKIŞI: {obv_trend}\n"
+                  f"--- TEKNİK ---\n"
+                  f"3. TREND: {trend}\n"
                   f"4. RSI: {rsi.iloc[-1]:.1f}\n"
-                  f"5. MACD: {'AL' if macd.iloc[-1] > signal.iloc[-1] else 'SAT'} Sinyali\n"
+                  f"5. MACD: {'AL' if macd.iloc[-1] > signal.iloc[-1] else 'SAT'}\n"
                   f"6. BANTLAR: {lower_bb.iloc[-1]:.2f} - {upper_bb.iloc[-1]:.2f}")
         
         return report, price
@@ -161,7 +171,7 @@ def ask_gemini(symbol, data):
     try:
         prompt = (f"GÖREV: Kripto Analizi. Coin: {symbol}.\n"
                   f"VERİLER:\n{data}\n"
-                  f"EMİR: Özellikle HACİM verisine bak. Hacim destekliyor mu yoksa balon mu? Karar (AL/SAT/BEKLE) ver.")
+                  f"EMİR: Hacim ve Fiyat uyumlu mu? Balon mu? AL/SAT/BEKLE kararı ver.")
         return model.generate_content(prompt).text.replace("**", "")
     except Exception as e: return f"⚠️ Gemini Hatası: {e}"
 
@@ -202,7 +212,7 @@ def handle_message(m):
             interval = sure / 60.0 if "DK" in birim or "DAK" in birim else float(sure)
             
             db_islem("INSERT INTO watchlist (symbol, interval_hours) VALUES (%s, %s) ON CONFLICT (symbol) DO UPDATE SET interval_hours = %s", (symbol, interval, interval))
-            bot.reply_to(m, f"✅ {found_coin} nöbeti başladı. Hacim destekli.")
+            bot.reply_to(m, f"✅ {found_coin} nöbeti başladı.")
             
             if interval <= 0.05:
                 bot.send_message(m.chat.id, "🚀 Hızlı analiz ateşleniyor...")
@@ -241,8 +251,7 @@ def watch_tower():
                 if HEROKU_APP_URL: requests.get(HEROKU_APP_URL)
                 last_ping = time.time()
 
-            # BURADA HATA VERİYORDU ÇÜNKÜ NEAR_TARGET SÜTUNU YOKTU.
-            # YUKARIDAKİ TADİLAT KODU BUNU ÇÖZECEK.
+            # ZORLA GÜNCELLEME YAPILDIĞI İÇİN ARTIK BU SQL ÇALIŞACAK
             rows = db_islem("SELECT symbol, interval_hours, last_report_time, target_price, near_target FROM watchlist")
             if rows:
                 now = datetime.now()
@@ -275,11 +284,11 @@ def watch_tower():
                                 time.sleep(2)
             time.sleep(20)
         except Exception as e:
-            print(f"Hata: {e}")
+            print(f"Watch Tower Hatası: {e}")
             time.sleep(20)
 
 if __name__ == "__main__":
     t = threading.Thread(target=watch_tower)
     t.start()
     server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-    
+                
