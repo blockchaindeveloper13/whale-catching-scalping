@@ -3,7 +3,7 @@ import time
 import telebot
 import os
 import pandas as pd
-import numpy as np  # <--- İŞTE BU! MERMİYİ EN BAŞA KOYDUK PAŞAM
+import numpy as np  # <--- PAŞAM, BU EN TEPEDE OLMAZSA MATEMATİK ÇÖKER
 import google.generativeai as genai
 import psycopg2
 import threading
@@ -21,14 +21,16 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
-# --- MODEL AYARI (SENİN EMRİNLE 2.5 FLASH) ---
+# --- MODEL AYARI ---
 genai.configure(api_key=GEMINI_API_KEY)
 try:
-    # Eğer Google 2.5 ismini kabul etmezse sistem çökmesin diye koruma
+    # Komutanın emriyle 2.5 (veya en yeni hangisiyse)
     model = genai.GenerativeModel('gemini-2.5-flash')
 except:
-    print("2.5 Bulunamadı, 1.5 deneniyor...")
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    except:
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
@@ -58,10 +60,12 @@ def db_islem(sql, params=None):
         print(f"DB Hatası: {e}")
         return None
 
-# Tablo Kurulumu
+# --- TABLO TADİLATI (BURASI ÇOK ÖNEMLİ) ---
 try:
     conn = db_baglan()
     cur = conn.cursor()
+    
+    # 1. Tablo yoksa oluştur
     cur.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
             symbol VARCHAR(20) PRIMARY KEY,
@@ -72,40 +76,49 @@ try:
             near_target BOOLEAN DEFAULT FALSE
         )
     """)
+    
+    # 2. TADİLAT: Eksik sütunları sonradan ekle (Eski tablolar için)
+    # Hata verirse (zaten varsa) pass geçecek.
+    try: cur.execute("ALTER TABLE watchlist ADD COLUMN target_price REAL DEFAULT 0")
+    except: pass
+    
+    try: cur.execute("ALTER TABLE watchlist ADD COLUMN near_target BOOLEAN DEFAULT FALSE")
+    except: pass
+    
     conn.commit()
     conn.close()
-except: pass
+    print("✅ Veritabanı tadilatı tamamlandı.")
+except Exception as e:
+    print(f"Tablo kurulum hatası: {e}")
 
-# --- TAM TEŞEKKÜLLÜ ANALİZ (HACİM + OBV + TEKNİK) ---
+# --- TAM TEŞEKKÜLLÜ ANALİZ ---
 def get_technical_data(symbol):
     try:
         if "/" not in symbol: symbol += "/USDT"
         
-        # Anlık Fiyat
         ticker = exchange.fetch_ticker(symbol)
         price = ticker['last']
         
-        # 100 Mum çek (Hacim ve İndikatörler için)
         bars = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
-        # --- 1. HACİM ANALİZİ ---
+        # 1. HACİM
         last_volume = df['volume'].iloc[-1]
         avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
         vol_change = ((last_volume - avg_volume) / avg_volume) * 100
         
-        # OBV Hesapla (NumPy artık başta olduğu için burası çalışacak!)
+        # OBV
         df['obv'] = (pd.Series(np.where(df['close'] > df['close'].shift(1), df['volume'], 
                        np.where(df['close'] < df['close'].shift(1), -df['volume'], 0))).cumsum())
         
         obv_trend = "POZİTİF (Para Girişi)" if df['obv'].iloc[-1] > df['obv'].iloc[-5] else "NEGATİF (Para Çıkışı)"
         
         hacim_durumu = ""
-        if vol_change > 50: hacim_durumu = "🔥 PATLAMA VAR (Çok Yüksek)"
+        if vol_change > 50: hacim_durumu = "🔥 PATLAMA (Çok Yüksek)"
         elif vol_change > 0: hacim_durumu = "GÜÇLÜ (Ortalama Üstü)"
-        else: hacim_durumu = "ZAYIF (Hacimsiz)"
+        else: hacim_durumu = "ZAYIF"
 
-        # --- 2. TEKNİK İNDİKATÖRLER ---
+        # 2. TEKNİK
         # RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -125,25 +138,23 @@ def get_technical_data(symbol):
         upper_bb = sma20 + (std * 2)
         lower_bb = sma20 - (std * 2)
         
-        # EMA Trend
+        # EMA
         ema50 = df['close'].ewm(span=50, adjust=False).mean()
-
-        # Trend Yorumu
-        trend = "YÜKSELİŞ (Boğa)" if price > ema50.iloc[-1] else "DÜŞÜŞ (Ayı)"
+        trend = "YÜKSELİŞ" if price > ema50.iloc[-1] else "DÜŞÜŞ"
         
-        report = (f"ANLIK FİYAT: {price}\n"
+        report = (f"FİYAT: {price}\n"
                   f"--- HACİM İSTİHBARATI ---\n"
                   f"1. HACİM: {hacim_durumu} (Değişim: %{vol_change:.1f})\n"
                   f"2. PARA AKIŞI (OBV): {obv_trend}\n"
                   f"--- TEKNİK DURUM ---\n"
                   f"3. TREND (EMA50): {trend}\n"
-                  f"4. RSI (1S): {rsi.iloc[-1]:.1f}\n"
+                  f"4. RSI: {rsi.iloc[-1]:.1f}\n"
                   f"5. MACD: {'AL' if macd.iloc[-1] > signal.iloc[-1] else 'SAT'} Sinyali\n"
                   f"6. BANTLAR: {lower_bb.iloc[-1]:.2f} - {upper_bb.iloc[-1]:.2f}")
         
         return report, price
     except Exception as e:
-        print(f"HATA OLUŞTU ({symbol}): {e}") # Hatayı konsola yaz
+        print(f"Veri Hatası ({symbol}): {e}")
         return None, 0
 
 def ask_gemini(symbol, data):
@@ -191,31 +202,32 @@ def handle_message(m):
             interval = sure / 60.0 if "DK" in birim or "DAK" in birim else float(sure)
             
             db_islem("INSERT INTO watchlist (symbol, interval_hours) VALUES (%s, %s) ON CONFLICT (symbol) DO UPDATE SET interval_hours = %s", (symbol, interval, interval))
-            bot.reply_to(m, f"✅ {found_coin} nöbeti başladı. Hacim destekli analiz yapacağım.")
+            bot.reply_to(m, f"✅ {found_coin} nöbeti başladı. Hacim destekli.")
             
-            # Hemen test et
             if interval <= 0.05:
-                bot.send_message(m.chat.id, "🚀 Hızlı analiz başlatılıyor...")
+                bot.send_message(m.chat.id, "🚀 Hızlı analiz ateşleniyor...")
                 data, prc = get_technical_data(symbol)
-                if data: 
-                    bot.send_message(m.chat.id, ask_gemini(symbol, data))
-                else:
-                    bot.send_message(m.chat.id, "⚠️ Analiz yapılamadı. Veri hatası.")
+                if data: bot.send_message(m.chat.id, ask_gemini(symbol, data))
             return
 
-        # B) MANUEL ANALİZ
+        # B) HEDEF FİYAT
+        hedef_match = re.search(r'(\d+(\.\d+)?)\s*(DOLAR|USDT|OLUNCA|OLURSA|HEDEF|FIYAT)', text)
+        if hedef_match:
+            fiyat = float(hedef_match.group(1))
+            db_islem("INSERT INTO watchlist (symbol, target_price, near_target) VALUES (%s, %s, FALSE) ON CONFLICT (symbol) DO UPDATE SET target_price = %s, near_target = FALSE", (symbol, fiyat, fiyat))
+            bot.reply_to(m, f"🎯 {found_coin} hedefi: {fiyat} USDT.")
+            return
+
+        # C) MANUEL
         if "ANALIZ" in text:
-            bot.reply_to(m, f"🔎 {found_coin} inceleniyor...")
+            bot.reply_to(m, f"🔎 {found_coin} taranıyor...")
             data, prc = get_technical_data(symbol)
-            if data: 
-                bot.send_message(m.chat.id, ask_gemini(symbol, data))
-            else:
-                bot.reply_to(m, "⚠️ Veri çekilemedi. Bir aksilik var Paşam.")
+            if data: bot.send_message(m.chat.id, ask_gemini(symbol, data))
             return
 
     if not m.text.startswith("/"):
         try:
-            res = model.generate_content(f"Sen askersin. Mesaj: {m.text}. Kısa cevap.").text
+            res = model.generate_content(f"Sen askersin. Kullanıcı: {m.text}. Kısa cevap.").text
             bot.reply_to(m, res.replace("**", ""))
         except: pass
 
@@ -229,12 +241,29 @@ def watch_tower():
                 if HEROKU_APP_URL: requests.get(HEROKU_APP_URL)
                 last_ping = time.time()
 
+            # BURADA HATA VERİYORDU ÇÜNKÜ NEAR_TARGET SÜTUNU YOKTU.
+            # YUKARIDAKİ TADİLAT KODU BUNU ÇÖZECEK.
             rows = db_islem("SELECT symbol, interval_hours, last_report_time, target_price, near_target FROM watchlist")
             if rows:
                 now = datetime.now()
                 for r in rows:
                     sym, interval, last_time, target, near_flag = r
                     
+                    # Alarm
+                    try:
+                        ticker = exchange.fetch_ticker(sym)
+                        price = ticker['last']
+                        if target and target > 0:
+                            diff = abs(price - target) / target * 100
+                            if diff < 0.2:
+                                bot.send_message(CHAT_ID, f"🚨 VURULDU PAŞAM! {sym}: {price}")
+                                db_islem("UPDATE watchlist SET target_price = 0 WHERE symbol = %s", (sym,))
+                            elif diff < 1.0 and not near_flag:
+                                bot.send_message(CHAT_ID, f"⚠️ {sym} hedefe yaklaştı ({price})")
+                                db_islem("UPDATE watchlist SET near_target = TRUE WHERE symbol = %s", (sym,))
+                    except: pass
+
+                    # Rapor
                     if interval:
                         gecen = (now - last_time).total_seconds() / 3600 if last_time else 999
                         if gecen >= interval:
@@ -242,7 +271,7 @@ def watch_tower():
                             if data:
                                 res = ask_gemini(sym, data)
                                 db_islem("UPDATE watchlist SET last_report_time = NOW() WHERE symbol = %s", (sym,))
-                                bot.send_message(CHAT_ID, f"⏰ {sym} DETAYLI RAPOR:\n{res}")
+                                bot.send_message(CHAT_ID, f"⏰ {sym} RAPORU:\n{res}")
                                 time.sleep(2)
             time.sleep(20)
         except Exception as e:
@@ -253,4 +282,4 @@ if __name__ == "__main__":
     t = threading.Thread(target=watch_tower)
     t.start()
     server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-        
+    
