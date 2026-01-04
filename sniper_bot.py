@@ -31,12 +31,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 model_name = 'gemini-3-pro-preview' # Analiz derinliği için şart
 # --- YENİ NESİL KOD (İNTERNETLİ) ---
 tools_list = [
-    {"google_search_retrieval": {
-        "dynamic_retrieval_config": {
-            "mode": "dynamic",  # Gerekirse ara, gerekmezse arama
-            "dynamic_threshold": 0.3
-        }
-    }}
+     {"google_search": {}} 
 ]
 
 try:
