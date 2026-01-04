@@ -4,10 +4,10 @@ import telebot
 import os
 import pandas as pd
 import numpy as np
-# --- YENİ NESİL KÜTÜPHANE ---
+# --- YENİ KÜTÜPHANE ---
 from google import genai
 from google.genai import types
-# ---------------------------
+# ----------------------
 import psycopg2
 import threading
 import requests
@@ -16,10 +16,10 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask, request
 from datetime import datetime
 
-# --- LOG AYARI (HEROKU İÇİN) ---
+# --- LOG AYARI ---
 sys.stdout.reconfigure(encoding='utf-8')
 
-# --- ORTAM DEĞİŞKENLERİ ---
+# --- AYARLAR ---
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY')
@@ -28,10 +28,10 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
-# --- YENİ NESİL GEMINI CLIENT KURULUMU ---
+# --- GEMINI CLIENT ---
 try:
     client = genai.Client(api_key=GEMINI_API_KEY)
-    print("✅ GEMINI 2.5: Client, Search ve Düşünme Modülü Hazır!")
+    print("✅ GEMINI: Gözler (Vision), Beyin (Thinking) ve İnternet (Search) AKTİF!")
 except Exception as e:
     print(f"⚠️ Client Hatası: {e}")
 
@@ -44,7 +44,6 @@ exchange = ccxt.binance({
     'options': {'defaultType': 'spot', 'adjustForTimeDifference': True},
     'enableRateLimit': True
 })
-
 exchange_vadeli = ccxt.binance({
     'apiKey': BINANCE_API_KEY, 'secret': BINANCE_SECRET,
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True},
@@ -71,106 +70,88 @@ def db_islem(sql, params=None):
         return res
     except: return None
 
-# Tablo Kurulumu
 try:
     conn = db_baglan()
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS price_alarms (
-            id SERIAL PRIMARY KEY,
-            symbol VARCHAR(20),
-            target_price REAL,
-            direction VARCHAR(10),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    cur.execute("CREATE TABLE IF NOT EXISTS price_alarms (id SERIAL PRIMARY KEY, symbol VARCHAR(20), target_price REAL, direction VARCHAR(10))")
     conn.commit()
     conn.close()
 except: pass
 
-# --- TEKNİK ANALİZ FONKSİYONU ---
+# --- TEKNİK ANALİZ ---
 def get_financial_report(symbol):
     if "/" not in symbol: symbol += "/USDT"
     report = f"--- 💼 {symbol} TEKNİK RAPOR ---\n"
-    
-    # Vadeli Fonlama
     try:
-        funding = exchange_vadeli.fetch_funding_rate(symbol)
-        rate = funding['fundingRate'] * 100
-        sentiment = "AŞIRI LONG" if rate > 0.01 else "AŞIRI SHORT" if rate < -0.01 else "NÖTR"
-        report += f"📊 Fonlama: %{rate:.4f} ({sentiment})\n"
-    except: pass
-
-    # Fiyat ve İndikatörler (4 Saatlik)
-    try:
-        bars = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=60)
-        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        bars = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=30)
+        df = pd.DataFrame(bars, columns=['time', 'o', 'h', 'l', 'c', 'v'])
         
-        # RSI
-        delta = df['close'].diff()
+        delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + gain/loss))
         
-        # Bollinger
-        sma20 = df['close'].rolling(20).mean()
-        std = df['close'].rolling(20).std()
-        upper = sma20 + (std * 2)
-        lower = sma20 - (std * 2)
-        bb_durum = "DARALMA (Patlama Yakın)" if (upper.iloc[-1]-lower.iloc[-1])/lower.iloc[-1] < 0.05 else "NORMAL"
-
-        report += f"💰 Fiyat: {df['close'].iloc[-1]}\n"
+        report += f"💰 Fiyat: {df['c'].iloc[-1]}\n"
         report += f"📈 RSI (4H): {rsi.iloc[-1]:.1f}\n"
-        report += f"📉 Bollinger: {bb_durum}\n"
-    except: report += "Veri çekilemedi.\n"
-            
+    except: pass
     return report
 
-# --- YAPAY ZEKA BEYNİ (ÇİFT MESAJLI - TELEPATİK VERSİYON) ---
-# DİKKAT: Bu fonksiyon aşağıda çağırılmadan ÖNCE tanımlanmalıdır.
-def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
+# --- YAPAY ZEKA BEYNİ (FOTOĞRAF + SEARCH + THINKING) ---
+# Parametreleri güncelledik: Artık image_data alabiliyor
+def ask_gemini_unified(chat_id, user_input, image_data=None, mime_type=None, system_instruction=None):
     if chat_id not in conversation_history:
         conversation_history[chat_id] = []
     
     history = conversation_history[chat_id]
     bugun = datetime.now().strftime("%d %B %Y (%A)")
     
-    # Prompt
+    # --- Prompt ---
     base_prompt = (
         f"BUGÜNÜN TARİHİ: {bugun}. \n"
-        "Sen Vedat Paşa'nın Kıdemli Finans Danışmanısın. Zeki, otoriter ve risk yönetimini bilen birisin.\n"
+        "Sen Vedat Paşa'nın Finans Danışmanısın. Zeki, otoriter ve risk uzmanısın.\n"
         "GÖREVLERİN:\n"
-        "1. Kullanıcı GÜNCEL VERİ sorarsa 'Google Search' kullan.\n"
-        "2. Cevabı vermeden önce DERİNLEMESİNE DÜŞÜN. Riskleri analiz et.\n"
-        "3. Kullanıcıya 'Paşam' diye hitap et.\n"
+        "1. Eğer RESİM geldiyse: Grafiği yorumla, formasyonları bul.\n"
+        "2. Eğer GÜNCEL VERİ sorulursa: Google Search kullan.\n"
+        "3. Her cevaptan önce DERİNLEMESİNE DÜŞÜN.\n"
+        "4. 'Paşam' diye hitap et.\n"
     )
     
     if system_instruction:
-        base_prompt += f"\n\nTEKNİK RAPOR:\n{system_instruction}"
+        base_prompt += f"\n\nTEKNİK VERİ:\n{system_instruction}"
 
-    history.append(f"Kullanıcı: {user_input}")
-    if len(history) > 10: history = history[-10:]
+    # İçerik Listesi (Görseli buraya ekleyeceğiz)
+    contents_to_send = [base_prompt]
+
+    # Geçmişi metin olarak ekle
+    history_text = "\nGEÇMİŞ SOHBET:\n" + "\n".join([h for h in history if isinstance(h, str)])
+    contents_to_send.append(history_text)
     
-    full_context = base_prompt + "\n\nGEÇMİŞ SOHBET:\n" + "\n".join(history)
+    # Kullanıcı mesajı
+    contents_to_send.append(f"Kullanıcı: {user_input}")
+
+    # --- FOTOĞRAF VARSA EKLE ---
+    if image_data:
+        image_part = types.Part.from_bytes(
+            data=image_data,
+            mime_type=mime_type
+        )
+        contents_to_send.append(image_part)
 
     try:
-        # --- GEMINI 2.5 PRO ÇAĞRISI ---
         response = client.models.generate_content(
             model='gemini-3-pro-preview',
-            contents=full_context,
+            contents=contents_to_send,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 response_modalities=["TEXT"],
-                thinking_config=types.ThinkingConfig(
-                    include_thoughts=True # Düşünceyi açıyoruz
-                )
+                thinking_config=types.ThinkingConfig(include_thoughts=True) # Düşünme Açık
             )
         )
         
         final_answer = ""
         thought_log = ""
 
-        # --- AYIKLAMA ---
+        # Ayıklama
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'thought') and part.thought is True:
@@ -178,24 +159,20 @@ def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
                 else:
                     final_answer += part.text
 
-                # --- TEMİZLİK (YILDIZLARI SİL) ---
+        # Temizlik
         if thought_log: thought_log = thought_log.replace("**", "").replace("##", "")
         if final_answer: final_answer = final_answer.replace("**", "").replace("##", "")
 
-
-        # --- 1. MESAJ: DÜŞÜNCE (AYRI GÖNDERİLİR) ---
+        # 1. Mesaj: Düşünce
         if thought_log:
             try:
-                log_mesaji = f"🧠 **[ZİHİN TARAMASI - GİZLİ]**\n\n{thought_log}"
-                bot.send_message(chat_id, log_mesaji, parse_mode="Markdown")
-            except:
-                # Markdown hatası verirse düz gönder
-                bot.send_message(chat_id, f"🧠 [ZİHİN]:\n{thought_log}")
+                bot.send_message(chat_id, f"🧠 [ZİHİN TARAMASI]:\n\n{thought_log[:2000]}")
+            except: pass
 
-        # --- 2. CEVAP HAZIRLIĞI ---
-        if not final_answer:
-            final_answer = "Paşam, çok derin düşündüm ama sonuç metni boş geldi. Zihin raporuna bakın."
-
+        # 2. Cevap
+        if not final_answer: final_answer = "Görseli inceledim ama söze dökemedim Paşam."
+        
+        # Hafızaya ekle (Resmi hafızada tutmuyoruz, sadece metni)
         history.append(f"Sen: {final_answer}")
         conversation_history[chat_id] = history
         
@@ -203,89 +180,74 @@ def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
 
     except Exception as e:
         print(f"HATA: {e}")
-        # Hata durumunda yedek model (Düşüncesiz)
-        try:
-            yedek = client.models.generate_content(model='gemini-3-pro-preview', contents=full_context)
-            return f"⚠️ (Yedek Hat) {yedek.text}"
-        except:
-            return f"⚠️ Paşam, Sistem Çöktü: {e}"
+        return f"⚠️ Paşam, Görsel/Zihin Hatası: {e}"
 
 # --- MENÜ ---
 def main_menu():
     m = InlineKeyboardMarkup(row_width=2)
-    m.add(InlineKeyboardButton("📈 BTC", callback_data="analiz_BTC"), InlineKeyboardButton("💎 ETH", callback_data="analiz_ETH"))
-    m.add(InlineKeyboardButton("🚀 AAVE", callback_data="analiz_AAVE"), InlineKeyboardButton("☀️ SOL", callback_data="analiz_SOL"))
-    m.add(InlineKeyboardButton("⏰ Alarm Kur", callback_data="alarm_kur"))
+    m.add(InlineKeyboardButton("📈 BTC", callback_data="analiz_BTC"), InlineKeyboardButton("🚀 AAVE", callback_data="analiz_AAVE"))
     m.add(InlineKeyboardButton("🗑️ Temizle", callback_data="hafiza_sil"))
     return m
 
 @bot.message_handler(commands=['start'])
 def welcome(m):
-    bot.reply_to(m, "Sayın Vedat Paşam, Finans Masası hazır. Zihin okuma modülü aktif.", reply_markup=main_menu())
+    bot.reply_to(m, "Paşam, Gözlerim, Beynim ve İnternetim aktif. Grafik atın, soru sorun.", reply_markup=main_menu())
 
-# --- BUTONLARI DİNLEME ---
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     chat_id = call.message.chat.id
-    
     if call.data == "hafiza_sil":
         conversation_history[chat_id] = []
         bot.answer_callback_query(call.id, "Temizlendi!")
         bot.send_message(chat_id, "Hafıza sıfırlandı Paşam.")
-
     elif call.data.startswith("analiz_"):
         coin = call.data.split("_")[1]
-        bot.answer_callback_query(call.id, "İnceleniyor...")
-        bot.send_message(chat_id, f"📊 {coin} dosyası masama geliyor...")
-        
+        bot.send_message(chat_id, f"📊 {coin} geliyor...")
         rapor = get_financial_report(f"{coin}/USDT")
-        # FONKSİYON BURADA ÇAĞRILIYOR (Tanımlı olduğu için hata vermez)
-        cevap = ask_gemini_with_memory(chat_id, f"Bu {coin} raporunu yorumla.", system_instruction=rapor)
+        cevap = ask_gemini_unified(chat_id, f"{coin} yorumla.", system_instruction=rapor)
         bot.send_message(chat_id, cevap)
 
-    elif call.data == "alarm_kur":
-        msg = bot.send_message(chat_id, "Hangi varlık ve fiyat? (Örn: AAVE 175)")
-        bot.register_next_step_handler(msg, set_alarm)
+# --- SOHBET VE FOTOĞRAF YAKALAYICI (BURASI ÇOK ÖNEMLİ) ---
+# content_types=['photo', 'text'] diyerek hem resmi hem yazıyı yakalıyoruz
+@bot.message_handler(content_types=['photo', 'text'])
+def handle_all(message):
+    chat_id = message.chat.id
+    
+    # Eğer resim varsa altına yazılan yazıyı al (caption), yoksa normal mesajı al
+    user_text = message.caption if message.caption else (message.text if message.text else "Bu resmi yorumla.")
+    
+    image_data = None
+    mime_type = None
 
-def set_alarm(m):
-    try:
-        parts = m.text.upper().split()
-        sym = parts[0] + "/USDT"
-        tgt = float(parts[1])
-        cur = exchange.fetch_ticker(sym)['last']
-        direc = 'ABOVE' if tgt > cur else 'BELOW'
-        db_islem("INSERT INTO price_alarms (symbol, target_price, direction) VALUES (%s, %s, %s)", (sym, tgt, direc))
-        bot.reply_to(m, "✅ Alarm kuruldu Paşam.")
-    except: bot.reply_to(m, "Format hatalı.")
-
-# --- ALARM DEVRİYESİ ---
-def alarm_patrol():
-    while True:
+    # FOTOĞRAF İŞLEME
+    if message.photo:
+        bot.send_chat_action(chat_id, 'typing') # "Yazıyor..." görünsün
         try:
-            alarms = db_islem("SELECT id, symbol, target_price, direction FROM price_alarms")
-            if alarms:
-                for a in alarms:
-                    aid, sym, tgt, d = a
-                    try:
-                        p = exchange.fetch_ticker(sym)['last']
-                        hit = (d == 'ABOVE' and p >= tgt) or (d == 'BELOW' and p <= tgt)
-                        if hit:
-                            bot.send_message(CHAT_ID, f"🚨 ALARM: {sym} -> {p}")
-                            db_islem("DELETE FROM price_alarms WHERE id = %s", (aid,))
-                    except: pass
-            if HEROKU_APP_URL: requests.get(HEROKU_APP_URL)
-            time.sleep(30)
-        except: time.sleep(30)
+            # Telegram'dan en kaliteli versiyonu indir
+            file_info = bot.get_file(message.photo[-1].file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            
+            image_data = downloaded_file
+            mime_type = "image/jpeg"
+            bot.reply_to(message, "📸 Grafik inceleniyor Paşam, bekleyin...")
+        except Exception as e:
+            bot.reply_to(message, f"Resim indirilemedi: {e}")
+            return
 
-# --- SOHBETİ DİNLEME ---
-@bot.message_handler(func=lambda m: True)
-def chat_logic(m):
-    chat_id = m.chat.id
-    # FONKSİYON BURADA ÇAĞRILIYOR
-    cevap = ask_gemini_with_memory(chat_id, m.text)
-    bot.reply_to(m, cevap)
+    # EĞER SADECE METİNSE
+    elif not message.text.startswith("/"):
+        # Normal sohbet
+        pass
+    else:
+        return # Komutsa (/start) işlem yapma
 
-# --- FLASK SERVER ---
+    # GEMINI'YE GÖNDER
+    cevap = ask_gemini_unified(chat_id, user_text, image_data=image_data, mime_type=mime_type)
+    
+    # Cevabı gönder (Düşünce zaten fonksiyon içinde gönderildi)
+    bot.send_message(chat_id, cevap)
+
+# --- SERVER ---
 @server.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
     bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
@@ -298,6 +260,5 @@ def webhook():
     return "OK", 200
 
 if __name__ == "__main__":
-    threading.Thread(target=alarm_patrol).start()
     server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-        
+
