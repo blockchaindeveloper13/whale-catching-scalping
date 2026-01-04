@@ -178,6 +178,11 @@ def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
                 else:
                     final_answer += part.text
 
+                # --- TEMİZLİK (YILDIZLARI SİL) ---
+        if thought_log: thought_log = thought_log.replace("**", "").replace("##", "")
+        if final_answer: final_answer = final_answer.replace("**", "").replace("##", "")
+
+
         # --- 1. MESAJ: DÜŞÜNCE (AYRI GÖNDERİLİR) ---
         if thought_log:
             try:
