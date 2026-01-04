@@ -53,7 +53,7 @@ try:
 except Exception as e:
     print(f"Model başlatma hatası: {e}")
     # Hata verirse en sağlam yedek modelle (1.5 Pro) başlat
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    model = genai.GenerativeModel('gemini-2.5-pro')
   
 
 bot = telebot.TeleBot(BOT_TOKEN)
