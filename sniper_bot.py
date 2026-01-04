@@ -29,10 +29,23 @@ HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 # --- MODEL SEÇİMİ (KESİN OLARAK PRO - EN ZEKİSİ) ---
 genai.configure(api_key=GEMINI_API_KEY)
 model_name = 'gemini-3-pro-preview' # Analiz derinliği için şart
+# --- YENİ NESİL KOD (İNTERNETLİ) ---
+tools_list = [
+    {"google_search_retrieval": {
+        "dynamic_retrieval_config": {
+            "mode": "dynamic",  # Gerekirse ara, gerekmezse arama
+            "dynamic_threshold": 0.3
+        }
+    }}
+]
+
 try:
-    model = genai.GenerativeModel(model_name)
+    # İşte sihirli değnek burada: tools parametresini ekliyoruz
+    model = genai.GenerativeModel(model_name, tools=tools_list)
 except:
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    # Yedek modelde de tool desteği varsa ekleriz
+    model = genai.GenerativeModel('gemini-3-pro-preview', tools=tools_list)
+    
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
