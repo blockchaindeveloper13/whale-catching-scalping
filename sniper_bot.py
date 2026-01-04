@@ -4,23 +4,22 @@ import telebot
 import os
 import pandas as pd
 import numpy as np
-# --- KRİTİK DEĞİŞİKLİK: YENİ KÜTÜPHANE ---
+# --- YENİ NESİL KÜTÜPHANE ---
 from google import genai
 from google.genai import types
-# -----------------------------------------
+# ---------------------------
 import psycopg2
 import threading
-import re
 import requests
 import sys
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask, request
 from datetime import datetime
 
-# --- LOG AYARI ---
+# --- LOG AYARI (HEROKU İÇİN) ---
 sys.stdout.reconfigure(encoding='utf-8')
 
-# --- AYARLAR ---
+# --- ORTAM DEĞİŞKENLERİ ---
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 BINANCE_API_KEY = os.environ.get('BINANCE_API_KEY')
@@ -29,13 +28,12 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
-# --- YENİ NESİL İSTEMCİ (CLIENT) KURULUMU ---
+# --- YENİ NESİL GEMINI CLIENT KURULUMU ---
 try:
-    # Eski 'genai.configure' yerine artık bu kullanılıyor
     client = genai.Client(api_key=GEMINI_API_KEY)
-    print("✅ GEMINI: Yeni Nesil Client (v1.0) ve Google Search Hazır!")
+    print("✅ GEMINI 2.5: Client, Search ve Düşünme Modülü Hazır!")
 except Exception as e:
-    print(f"⚠️ Client Başlatma Hatası: {e}")
+    print(f"⚠️ Client Hatası: {e}")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
@@ -53,7 +51,7 @@ exchange_vadeli = ccxt.binance({
     'enableRateLimit': True
 })
 
-# --- UZUN SÜRELİ HAFIZA (RAM) ---
+# --- HAFIZA ---
 conversation_history = {}
 
 # --- VERİTABANI ---
@@ -90,163 +88,158 @@ try:
     conn.close()
 except: pass
 
-# --- DERİN TEKNİK ANALİZ ---
+# --- TEKNİK ANALİZ FONKSİYONU ---
 def get_financial_report(symbol):
     if "/" not in symbol: symbol += "/USDT"
+    report = f"--- 💼 {symbol} TEKNİK RAPOR ---\n"
     
-    report = f"--- 💼 {symbol} FİNANSAL DURUM RAPORU ---\n"
-    
-    # 1. Market Psikolojisi
+    # Vadeli Fonlama
     try:
         funding = exchange_vadeli.fetch_funding_rate(symbol)
         rate = funding['fundingRate'] * 100
-        sentiment = "AŞIRI LONG (Tuzak Riski)" if rate > 0.01 else "AŞIRI SHORT (Sıkışma Riski)" if rate < -0.01 else "NÖTR"
-        report += f"\n📊 MARKET DERİNLİĞİ: Fonlama %{rate:.4f} -> {sentiment}\n"
-    except: report += "\n📊 MARKET: Veri yok (Spot olabilir)\n"
+        sentiment = "AŞIRI LONG" if rate > 0.01 else "AŞIRI SHORT" if rate < -0.01 else "NÖTR"
+        report += f"📊 Fonlama: %{rate:.4f} ({sentiment})\n"
+    except: pass
 
-    report += "-" * 30 + "\n"
+    # Fiyat ve İndikatörler (4 Saatlik)
+    try:
+        bars = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=60)
+        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi = 100 - (100 / (1 + gain/loss))
+        
+        # Bollinger
+        sma20 = df['close'].rolling(20).mean()
+        std = df['close'].rolling(20).std()
+        upper = sma20 + (std * 2)
+        lower = sma20 - (std * 2)
+        bb_durum = "DARALMA (Patlama Yakın)" if (upper.iloc[-1]-lower.iloc[-1])/lower.iloc[-1] < 0.05 else "NORMAL"
 
-    # 2. Teknik İndikatörler
-    timeframes = ['15m', '1h', '4h', '1d']
-    for tf in timeframes:
-        try:
-            bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=60)
-            df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-            
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + gain/loss))
-            
-            ema50 = df['close'].ewm(span=50, adjust=False).mean()
-            
-            exp12 = df['close'].ewm(span=12, adjust=False).mean()
-            exp26 = df['close'].ewm(span=26, adjust=False).mean()
-            macd = exp12 - exp26
-            signal = macd.ewm(span=9, adjust=False).mean()
-            
-            sma20 = df['close'].rolling(20).mean()
-            std = df['close'].rolling(20).std()
-            upper = sma20 + (std * 2)
-            lower = sma20 - (std * 2)
-            bb_durum = "DARALMA" if (upper.iloc[-1]-lower.iloc[-1])/lower.iloc[-1] < 0.05 else "NORMAL"
-
-            vol_completed = df['volume'].iloc[-2]
-            vol_avg = df['volume'].iloc[-22:-2].mean()
-            vol_ratio = vol_completed / vol_avg if vol_avg > 0 else 0
-            vol_text = "HACİM DESTEKLİ" if vol_ratio > 1.2 else "HACİMSİZ" if vol_ratio < 0.8 else "NORMAL"
-
-            obv = (pd.Series(np.where(df['close'] > df['close'].shift(1), df['volume'], 
-                           np.where(df['close'] < df['close'].shift(1), -df['volume'], 0))).cumsum())
-            obv_dir = "POZİTİF" if obv.iloc[-1] > obv.iloc[-10] else "NEGATİF"
-
-            report += f"🕒 {tf.upper()} | Fiyat: {df['close'].iloc[-1]}\n"
-            report += f"   • RSI: {rsi.iloc[-1]:.1f} | MACD: {'AL' if macd.iloc[-1]>signal.iloc[-1] else 'SAT'}\n"
-            report += f"   • Trend: {'BOĞA' if df['close'].iloc[-1] > ema50.iloc[-1] else 'AYI'} | BB: {bb_durum}\n"
-            report += f"   • Hacim: {vol_text} (x{vol_ratio:.1f}) | OBV: {obv_dir}\n\n"
-        except: pass
+        report += f"💰 Fiyat: {df['close'].iloc[-1]}\n"
+        report += f"📈 RSI (4H): {rsi.iloc[-1]:.1f}\n"
+        report += f"📉 Bollinger: {bb_durum}\n"
+    except: report += "Veri çekilemedi.\n"
             
     return report
 
-# --- YAPAY ZEKA BEYNİ (YENİ NESİL - GOOGLE SEARCH ENTEGRELİ) ---
+# --- YAPAY ZEKA BEYNİ (ÇİFT MESAJLI - TELEPATİK VERSİYON) ---
+# DİKKAT: Bu fonksiyon aşağıda çağırılmadan ÖNCE tanımlanmalıdır.
 def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
     if chat_id not in conversation_history:
         conversation_history[chat_id] = []
     
-    # Geçmişi al
     history = conversation_history[chat_id]
-    
-    # Tarih damgası (Botun "Eski" haberi ayırt etmesi için)
     bugun = datetime.now().strftime("%d %B %Y (%A)")
     
-    # --- Prompt Hazırlığı ---
-    # Yeni SDK'da geçmişi ve talimatı birleştirip göndermek en güvenli yoldur.
+    # Prompt
     base_prompt = (
-        f"BUGÜNÜN TARİHİ: {bugun}. BU ÇOK ÖNEMLİ.\n"
+        f"BUGÜNÜN TARİHİ: {bugun}. \n"
         "Sen Vedat Paşa'nın Kıdemli Finans Danışmanısın. Zeki, otoriter ve risk yönetimini bilen birisin.\n"
         "GÖREVLERİN:\n"
-        "1. Kullanıcı GÜNCEL BİR VERİ (Haber, Fiyat, Son Durum) sorarsa, 'Google Search' aracını KULLANMAK ZORUNDASIN.\n"
-        "2. Mayıs 2024, 2025 gibi eski tarihli haberleri 'GÜNCEL' diye sunma. Bugünün ({bugun}) verisini bul.\n"
+        "1. Kullanıcı GÜNCEL VERİ sorarsa 'Google Search' kullan.\n"
+        "2. Cevabı vermeden önce DERİNLEMESİNE DÜŞÜN. Riskleri analiz et.\n"
         "3. Kullanıcıya 'Paşam' diye hitap et.\n"
     )
     
     if system_instruction:
         base_prompt += f"\n\nTEKNİK RAPOR:\n{system_instruction}"
 
-    # Kullanıcının mesajını geçmişe ekle
     history.append(f"Kullanıcı: {user_input}")
+    if len(history) > 10: history = history[-10:]
     
-    # Hafıza sınırı (Son 15 mesaj)
-    if len(history) > 15: history = history[-15:]
-    
-    # Modele gidecek tam metin
     full_context = base_prompt + "\n\nGEÇMİŞ SOHBET:\n" + "\n".join(history)
 
     try:
-        # --- YENİ NESİL ÇAĞRI (SENİN DOKÜMANDAKİ GİBİ) ---
+        # --- GEMINI 2.5 PRO ÇAĞRISI ---
         response = client.models.generate_content(
-            model='gemini-3-pro-preview', # Google'ın Search için önerdiği hızlı model
+            model='gemini-3-pro-preview',
             contents=full_context,
             config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())], # RESMİ SEARCH ARACI
-                response_modalities=["TEXT"]
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                response_modalities=["TEXT"],
+                thinking_config=types.ThinkingConfig(
+                    include_thoughts=True # Düşünceyi açıyoruz
+                )
             )
         )
         
-        # Cevabı al
-        text_response = response.text
-        
-        # Hafızaya ekle
-        history.append(f"Sen: {text_response}")
+        final_answer = ""
+        thought_log = ""
+
+        # --- AYIKLAMA ---
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'thought') and part.thought is True:
+                    thought_log += part.text
+                else:
+                    final_answer += part.text
+
+        # --- 1. MESAJ: DÜŞÜNCE (AYRI GÖNDERİLİR) ---
+        if thought_log:
+            try:
+                log_mesaji = f"🧠 **[ZİHİN TARAMASI - GİZLİ]**\n\n{thought_log}"
+                bot.send_message(chat_id, log_mesaji, parse_mode="Markdown")
+            except:
+                # Markdown hatası verirse düz gönder
+                bot.send_message(chat_id, f"🧠 [ZİHİN]:\n{thought_log}")
+
+        # --- 2. CEVAP HAZIRLIĞI ---
+        if not final_answer:
+            final_answer = "Paşam, çok derin düşündüm ama sonuç metni boş geldi. Zihin raporuna bakın."
+
+        history.append(f"Sen: {final_answer}")
         conversation_history[chat_id] = history
         
-        return text_response
+        return final_answer
 
     except Exception as e:
         print(f"HATA: {e}")
-        # Hata olursa internetsiz cevap ver (Yedek)
+        # Hata durumunda yedek model (Düşüncesiz)
         try:
-            response = client.models.generate_content(
-                model='gemini-3-pro-preview',
-                contents=full_context
-            )
-            return response.text
+            yedek = client.models.generate_content(model='gemini-3-pro-preview', contents=full_context)
+            return f"⚠️ (Yedek Hat) {yedek.text}"
         except:
-            return f"⚠️ Paşam, İstihbarat Ağı Çöktü: {e}"
+            return f"⚠️ Paşam, Sistem Çöktü: {e}"
 
 # --- MENÜ ---
 def main_menu():
     m = InlineKeyboardMarkup(row_width=2)
-    m.add(InlineKeyboardButton("📈 BTC Analiz", callback_data="analiz_BTC"), InlineKeyboardButton("💎 ETH Analiz", callback_data="analiz_ETH"))
-    m.add(InlineKeyboardButton("🚀 AAVE Analiz", callback_data="analiz_AAVE"), InlineKeyboardButton("☀️ SOL Analiz", callback_data="analiz_SOL"))
-    m.add(InlineKeyboardButton("⏰ Fiyat Alarmı Kur", callback_data="alarm_kur"))
-    m.add(InlineKeyboardButton("🗑️ HAFIZAYI SİL (RESET)", callback_data="hafiza_sil"))
+    m.add(InlineKeyboardButton("📈 BTC", callback_data="analiz_BTC"), InlineKeyboardButton("💎 ETH", callback_data="analiz_ETH"))
+    m.add(InlineKeyboardButton("🚀 AAVE", callback_data="analiz_AAVE"), InlineKeyboardButton("☀️ SOL", callback_data="analiz_SOL"))
+    m.add(InlineKeyboardButton("⏰ Alarm Kur", callback_data="alarm_kur"))
+    m.add(InlineKeyboardButton("🗑️ Temizle", callback_data="hafiza_sil"))
     return m
 
 @bot.message_handler(commands=['start'])
 def welcome(m):
-    bot.reply_to(m, "Sayın Vedat Paşam, Finans Masası hazır. Portföyünüzü yönetmeye geldim. Duygusallığa yer yok, sadece matematik.", reply_markup=main_menu())
+    bot.reply_to(m, "Sayın Vedat Paşam, Finans Masası hazır. Zihin okuma modülü aktif.", reply_markup=main_menu())
 
+# --- BUTONLARI DİNLEME ---
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     chat_id = call.message.chat.id
     
     if call.data == "hafiza_sil":
         conversation_history[chat_id] = []
-        bot.answer_callback_query(call.id, "✅ Hafıza Formatlandı!")
-        bot.send_message(chat_id, "Geçmişi sildim Paşam. Temiz bir sayfa açtık. Şimdi stratejimiz ne?")
+        bot.answer_callback_query(call.id, "Temizlendi!")
+        bot.send_message(chat_id, "Hafıza sıfırlandı Paşam.")
 
     elif call.data.startswith("analiz_"):
         coin = call.data.split("_")[1]
-        bot.answer_callback_query(call.id, "Veriler Çekiliyor...")
-        bot.send_message(chat_id, f"📊 {coin} dosyası masama geliyor Paşam. Bekleyiniz...")
+        bot.answer_callback_query(call.id, "İnceleniyor...")
+        bot.send_message(chat_id, f"📊 {coin} dosyası masama geliyor...")
         
         rapor = get_financial_report(f"{coin}/USDT")
-        cevap = ask_gemini_with_memory(chat_id, f"Bu {coin} raporunu yorumla. Alım fırsatı mı yoksa tuzak mı? Beni yönlendir.", system_instruction=rapor)
+        # FONKSİYON BURADA ÇAĞRILIYOR (Tanımlı olduğu için hata vermez)
+        cevap = ask_gemini_with_memory(chat_id, f"Bu {coin} raporunu yorumla.", system_instruction=rapor)
         bot.send_message(chat_id, cevap)
 
     elif call.data == "alarm_kur":
-        msg = bot.send_message(chat_id, "Hangi varlık ve hangi fiyat Paşam? (Örn: AAVE 175)")
+        msg = bot.send_message(chat_id, "Hangi varlık ve fiyat? (Örn: AAVE 175)")
         bot.register_next_step_handler(msg, set_alarm)
 
 def set_alarm(m):
@@ -257,9 +250,10 @@ def set_alarm(m):
         cur = exchange.fetch_ticker(sym)['last']
         direc = 'ABOVE' if tgt > cur else 'BELOW'
         db_islem("INSERT INTO price_alarms (symbol, target_price, direction) VALUES (%s, %s, %s)", (sym, tgt, direc))
-        bot.reply_to(m, f"✅ Not alındı Paşam. {sym} {tgt} seviyesine gelince masanıza bilgi düşecek.")
-    except: bot.reply_to(m, "Format hatalı Paşam. Tekrar deneyin.")
+        bot.reply_to(m, "✅ Alarm kuruldu Paşam.")
+    except: bot.reply_to(m, "Format hatalı.")
 
+# --- ALARM DEVRİYESİ ---
 def alarm_patrol():
     while True:
         try:
@@ -271,32 +265,22 @@ def alarm_patrol():
                         p = exchange.fetch_ticker(sym)['last']
                         hit = (d == 'ABOVE' and p >= tgt) or (d == 'BELOW' and p <= tgt)
                         if hit:
-                            bot.send_message(CHAT_ID, f"🚨 DİKKAT PAŞAM! FİYAT HEDEFTE!\n{sym}: {p}\nHedef: {tgt}")
+                            bot.send_message(CHAT_ID, f"🚨 ALARM: {sym} -> {p}")
                             db_islem("DELETE FROM price_alarms WHERE id = %s", (aid,))
                     except: pass
             if HEROKU_APP_URL: requests.get(HEROKU_APP_URL)
             time.sleep(30)
         except: time.sleep(30)
 
+# --- SOHBETİ DİNLEME ---
 @bot.message_handler(func=lambda m: True)
 def chat_logic(m):
-    text = m.text.upper()
     chat_id = m.chat.id
-    
-    if "ANALIZ" in text:
-        words = text.split()
-        coin = next((w for w in words if len(w) > 2 and w not in ["ANALIZ", "YAP", "NEDIR"]), None)
-        if coin:
-            bot.reply_to(m, f"🔎 {coin} inceleniyor Paşam...")
-            rapor = get_financial_report(f"{coin}/USDT")
-            cevap = ask_gemini_with_memory(chat_id, f"Şu {coin} raporuna bak ve bana net bir strateji çiz.", system_instruction=rapor)
-            bot.send_message(chat_id, cevap)
-            return
+    # FONKSİYON BURADA ÇAĞRILIYOR
+    cevap = ask_gemini_with_memory(chat_id, m.text)
+    bot.reply_to(m, cevap)
 
-    if not m.text.startswith("/"):
-        cevap = ask_gemini_with_memory(chat_id, m.text)
-        bot.reply_to(m, cevap)
-
+# --- FLASK SERVER ---
 @server.route('/' + BOT_TOKEN, methods=['POST'])
 def getMessage():
     bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode('utf-8'))])
@@ -311,4 +295,4 @@ def webhook():
 if __name__ == "__main__":
     threading.Thread(target=alarm_patrol).start()
     server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-    
+        
