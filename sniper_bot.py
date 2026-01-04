@@ -4,7 +4,10 @@ import telebot
 import os
 import pandas as pd
 import numpy as np
-import google.generativeai as genai
+# --- KRİTİK DEĞİŞİKLİK: YENİ KÜTÜPHANE ---
+from google import genai
+from google.genai import types
+# -----------------------------------------
 import psycopg2
 import threading
 import re
@@ -26,35 +29,13 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 
-# --- MODEL SEÇİMİ (KESİN OLARAK PRO - EN ZEKİSİ) ---
-genai.configure(api_key=GEMINI_API_KEY)
-model_name = 'gemini-3-pro-preview' # Analiz derinliği için şart
-
-# --- YENİ NESİL KOD (ZIRHLI VERSİYON - PROTOS) ---
+# --- YENİ NESİL İSTEMCİ (CLIENT) KURULUMU ---
 try:
-    # Kütüphanenin kendi resmi objesini (protos) kullanıyoruz.
-    # Bu sayede "Unknown field" hatası bypass ediliyor.
-    search_tool = genai.protos.Tool(
-        google_search=genai.protos.GoogleSearch()
-    )
-    tools_list = [search_tool]
+    # Eski 'genai.configure' yerine artık bu kullanılıyor
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    print("✅ GEMINI: Yeni Nesil Client (v1.0) ve Google Search Hazır!")
 except Exception as e:
-    print(f"Tool oluşturma hatası: {e}")
-    tools_list = None
-
-# --- MODELİ BAŞLATMA ---
-try:
-    if tools_list:
-        model = genai.GenerativeModel(model_name, tools=tools_list)
-        print("✅ MOD: Gemini (İnternetli - Protos) Başlatıldı")
-    else:
-        model = genai.GenerativeModel(model_name)
-        print("⚠️ MOD: İnternetsiz Başlatıldı (Tool hatası)")
-except Exception as e:
-    print(f"Model başlatma hatası: {e}")
-    # Hata verirse en sağlam yedek modelle (1.5 Pro) başlat
-    model = genai.GenerativeModel('gemini-2.5-pro')
-  
+    print(f"⚠️ Client Başlatma Hatası: {e}")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
@@ -109,13 +90,13 @@ try:
     conn.close()
 except: pass
 
-# --- DERİN TEKNİK ANALİZ (FİNANSÇI GÖZÜ) ---
+# --- DERİN TEKNİK ANALİZ ---
 def get_financial_report(symbol):
     if "/" not in symbol: symbol += "/USDT"
     
     report = f"--- 💼 {symbol} FİNANSAL DURUM RAPORU ---\n"
     
-    # 1. Market Psikolojisi (Vadeli)
+    # 1. Market Psikolojisi
     try:
         funding = exchange_vadeli.fetch_funding_rate(symbol)
         rate = funding['fundingRate'] * 100
@@ -125,43 +106,36 @@ def get_financial_report(symbol):
 
     report += "-" * 30 + "\n"
 
-    # 2. Çoklu Zaman Dilimi Analizi
+    # 2. Teknik İndikatörler
     timeframes = ['15m', '1h', '4h', '1d']
     for tf in timeframes:
         try:
             bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=60)
             df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
             
-            # --- İNDİKATÖRLER ---
-            # RSI (14 Standart)
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rsi = 100 - (100 / (1 + gain/loss))
             
-            # EMA
             ema50 = df['close'].ewm(span=50, adjust=False).mean()
             
-            # MACD
             exp12 = df['close'].ewm(span=12, adjust=False).mean()
             exp26 = df['close'].ewm(span=26, adjust=False).mean()
             macd = exp12 - exp26
             signal = macd.ewm(span=9, adjust=False).mean()
             
-            # Bollinger
             sma20 = df['close'].rolling(20).mean()
             std = df['close'].rolling(20).std()
             upper = sma20 + (std * 2)
             lower = sma20 - (std * 2)
-            bb_durum = "DARALMA (Patlama Yakın)" if (upper.iloc[-1]-lower.iloc[-1])/lower.iloc[-1] < 0.05 else "NORMAL"
+            bb_durum = "DARALMA" if (upper.iloc[-1]-lower.iloc[-1])/lower.iloc[-1] < 0.05 else "NORMAL"
 
-            # HACİM (Bitmiş Mum Analizi)
             vol_completed = df['volume'].iloc[-2]
             vol_avg = df['volume'].iloc[-22:-2].mean()
             vol_ratio = vol_completed / vol_avg if vol_avg > 0 else 0
-            vol_text = "HACİM DESTEKLİ" if vol_ratio > 1.2 else "HACİMSİZ (Güvensiz)" if vol_ratio < 0.8 else "NORMAL"
+            vol_text = "HACİM DESTEKLİ" if vol_ratio > 1.2 else "HACİMSİZ" if vol_ratio < 0.8 else "NORMAL"
 
-            # OBV Trend
             obv = (pd.Series(np.where(df['close'] > df['close'].shift(1), df['volume'], 
                            np.where(df['close'] < df['close'].shift(1), -df['volume'], 0))).cumsum())
             obv_dir = "POZİTİF" if obv.iloc[-1] > obv.iloc[-10] else "NEGATİF"
@@ -174,47 +148,71 @@ def get_financial_report(symbol):
             
     return report
 
-# --- YAPAY ZEKA BEYNİ (SOHBET GEÇMİŞİ YÖNETİMİ) ---
+# --- YAPAY ZEKA BEYNİ (YENİ NESİL - GOOGLE SEARCH ENTEGRELİ) ---
 def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
     if chat_id not in conversation_history:
         conversation_history[chat_id] = []
     
+    # Geçmişi al
     history = conversation_history[chat_id]
-    history.append({"role": "user", "parts": [user_input]})
     
-    if len(history) > 30: history = history[-30:]
-
-    # Sistem Talimatı (Persona)
-        # Sistem Talimatı (Persona - GÜNCELLENDİ)
-    base_instruction = (
-        "SENİN ROLÜN: Vedat Paşa'nın Kıdemli Baş Finans Danışmanısın.\n"
-        "KİMLİK: Çok zeki, otoriter, risk yönetimi uzmanı, hafif iğneleyici ama saygılı birisin.\n"
-        "HİTAP: Kullanıcıya sadece 'Paşam' diye hitap et.\n"
+    # Tarih damgası (Botun "Eski" haberi ayırt etmesi için)
+    bugun = datetime.now().strftime("%d %B %Y (%A)")
+    
+    # --- Prompt Hazırlığı ---
+    # Yeni SDK'da geçmişi ve talimatı birleştirip göndermek en güvenli yoldur.
+    base_prompt = (
+        f"BUGÜNÜN TARİHİ: {bugun}. BU ÇOK ÖNEMLİ.\n"
+        "Sen Vedat Paşa'nın Kıdemli Finans Danışmanısın. Zeki, otoriter ve risk yönetimini bilen birisin.\n"
         "GÖREVLERİN:\n"
-        "1. Kullanıcının duygusal (FOMO) kararlar almasını ENGELLE.\n"
-        "2. EĞER kullanıcı 'Haber var mı?', 'Son durum ne?', 'Fiyat kaç?' gibi GÜNCEL VERİ isterse: "
-        "ELİNDEKİ 'GOOGLE SEARCH' ARACINI KULLANMAK ZORUNDASIN. 'Ben Google'a bakmam' deme! "
-        "Güncel istihbarat olmadan savaş kazanılmaz. Git interneti tara ve taze veriyi getir.\n"
-        "3. Veriyi getirdikten sonra yine kendi sert yorumunu katabilirsin.\n"
-        "UYARI: Asla eski tarihli (Halving yaklaşıyor gibi) hatalı bilgi verme. Emin değilsen ara.\n"
+        "1. Kullanıcı GÜNCEL BİR VERİ (Haber, Fiyat, Son Durum) sorarsa, 'Google Search' aracını KULLANMAK ZORUNDASIN.\n"
+        "2. Mayıs 2024, 2025 gibi eski tarihli haberleri 'GÜNCEL' diye sunma. Bugünün ({bugun}) verisini bul.\n"
+        "3. Kullanıcıya 'Paşam' diye hitap et.\n"
     )
     
-    
     if system_instruction:
-        full_prompt = f"{base_instruction}\n\nEK BİLGİ / RAPOR:\n{system_instruction}"
-    else:
-        full_prompt = base_instruction
+        base_prompt += f"\n\nTEKNİK RAPOR:\n{system_instruction}"
+
+    # Kullanıcının mesajını geçmişe ekle
+    history.append(f"Kullanıcı: {user_input}")
+    
+    # Hafıza sınırı (Son 15 mesaj)
+    if len(history) > 15: history = history[-15:]
+    
+    # Modele gidecek tam metin
+    full_context = base_prompt + "\n\nGEÇMİŞ SOHBET:\n" + "\n".join(history)
 
     try:
-        chat = model.start_chat(history=history)
-        response = chat.send_message(full_prompt)
-        text_response = response.text.replace("**", "")
+        # --- YENİ NESİL ÇAĞRI (SENİN DOKÜMANDAKİ GİBİ) ---
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', # Google'ın Search için önerdiği hızlı model
+            contents=full_context,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())], # RESMİ SEARCH ARACI
+                response_modalities=["TEXT"]
+            )
+        )
         
-        history.append({"role": "model", "parts": [text_response]})
+        # Cevabı al
+        text_response = response.text
+        
+        # Hafızaya ekle
+        history.append(f"Sen: {text_response}")
         conversation_history[chat_id] = history
+        
         return text_response
+
     except Exception as e:
-        return f"⚠️ Finansal Sistem Hatası: {e}"
+        print(f"HATA: {e}")
+        # Hata olursa internetsiz cevap ver (Yedek)
+        try:
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=full_context
+            )
+            return response.text
+        except:
+            return f"⚠️ Paşam, İstihbarat Ağı Çöktü: {e}"
 
 # --- MENÜ ---
 def main_menu():
@@ -313,4 +311,4 @@ def webhook():
 if __name__ == "__main__":
     threading.Thread(target=alarm_patrol).start()
     server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-            
+    
