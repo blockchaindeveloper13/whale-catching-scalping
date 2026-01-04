@@ -29,18 +29,32 @@ HEROKU_APP_URL = os.environ.get('HEROKU_APP_URL')
 # --- MODEL SEÇİMİ (KESİN OLARAK PRO - EN ZEKİSİ) ---
 genai.configure(api_key=GEMINI_API_KEY)
 model_name = 'gemini-3-pro-preview' # Analiz derinliği için şart
-# --- YENİ NESİL KOD (İNTERNETLİ) ---
-tools_list = [
-     {"google_search": {}} 
-]
 
+# --- YENİ NESİL KOD (ZIRHLI VERSİYON - PROTOS) ---
 try:
-    # İşte sihirli değnek burada: tools parametresini ekliyoruz
-    model = genai.GenerativeModel(model_name, tools=tools_list)
-except:
-    # Yedek modelde de tool desteği varsa ekleriz
-    model = genai.GenerativeModel('gemini-3-pro-preview', tools=tools_list)
-    
+    # Kütüphanenin kendi resmi objesini (protos) kullanıyoruz.
+    # Bu sayede "Unknown field" hatası bypass ediliyor.
+    search_tool = genai.protos.Tool(
+        google_search=genai.protos.GoogleSearch()
+    )
+    tools_list = [search_tool]
+except Exception as e:
+    print(f"Tool oluşturma hatası: {e}")
+    tools_list = None
+
+# --- MODELİ BAŞLATMA ---
+try:
+    if tools_list:
+        model = genai.GenerativeModel(model_name, tools=tools_list)
+        print("✅ MOD: Gemini (İnternetli - Protos) Başlatıldı")
+    else:
+        model = genai.GenerativeModel(model_name)
+        print("⚠️ MOD: İnternetsiz Başlatıldı (Tool hatası)")
+except Exception as e:
+    print(f"Model başlatma hatası: {e}")
+    # Hata verirse en sağlam yedek modelle (1.5 Pro) başlat
+    model = genai.GenerativeModel('gemini-1.5-pro')
+  
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
