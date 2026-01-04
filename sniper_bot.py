@@ -185,7 +185,7 @@ def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
     try:
         # --- YENİ NESİL ÇAĞRI (SENİN DOKÜMANDAKİ GİBİ) ---
         response = client.models.generate_content(
-            model='gemini-2.5-flash', # Google'ın Search için önerdiği hızlı model
+            model='gemini-3-pro-preview', # Google'ın Search için önerdiği hızlı model
             contents=full_context,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())], # RESMİ SEARCH ARACI
@@ -207,7 +207,7 @@ def ask_gemini_with_memory(chat_id, user_input, system_instruction=None):
         # Hata olursa internetsiz cevap ver (Yedek)
         try:
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-3-pro-preview',
                 contents=full_context
             )
             return response.text
