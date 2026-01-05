@@ -217,6 +217,7 @@ def get_deep_financial_report(symbol):
     return report
 
 # --- YAPAY ZEKA BEYNİ (DÜŞÜNME + GÖRME + HAFIZA) 🧠 ---
+# --- YAPAY ZEKA BEYNİ (DÜŞÜNME + GÖRME + HAFIZA + TEMİZLİK) 🧠 ---
 def ask_gemini_unified(chat_id, user_input, image_data=None, mime_type=None, system_instruction=None):
     bugun = datetime.now().strftime("%d %B %Y (%A)")
     
@@ -251,12 +252,12 @@ def ask_gemini_unified(chat_id, user_input, image_data=None, mime_type=None, sys
 
     try:
         response = client.models.generate_content(
-            model='gemini-3-pro-preview', # SENİN GÜÇLÜ MODELİN
+            model='gemini-3-pro-preview', 
             contents=contents_to_send,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 response_modalities=["TEXT"],
-                thinking_config=types.ThinkingConfig(include_thoughts=True) # DÜŞÜNME MEKANİZMASI BURADA
+                thinking_config=types.ThinkingConfig(include_thoughts=True)
             )
         )
         
@@ -270,10 +271,17 @@ def ask_gemini_unified(chat_id, user_input, image_data=None, mime_type=None, sys
                 else:
                     final_answer += part.text
 
+        # --- TEMİZLİK OPERASYONU (ZIMPARA) ---
+        if thought_log: 
+            thought_log = thought_log.replace("**", "").replace("##", "").replace("###", "")
+        
+        if final_answer: 
+            # Yıldızları sil, Başlık karelerini sil, Tireleri madde imine çevir
+            final_answer = final_answer.replace("**", "").replace("##", "").replace("###", "").replace("- ", "• ")
+
         if thought_log:
             try:
-                # Düşünce sürecini de kullanıcıya gösteriyoruz (Şeffaflık)
-                bot.send_message(chat_id, f"🧠 [ZİHİN TARAMASI - FUNDING & DEPTH]:\n\n{thought_log[:2000]}")
+                bot.send_message(chat_id, f"🧠 [ZİHİN TARAMASI]:\n\n{thought_log[:2000]}")
             except: pass
 
         if not final_answer: final_answer = "Düşündüm ama söze dökemedim Paşam."
@@ -284,6 +292,7 @@ def ask_gemini_unified(chat_id, user_input, image_data=None, mime_type=None, sys
     except Exception as e:
         print(f"HATA: {e}")
         return f"⚠️ Paşam, Sistem Hatası: {e}"
+
 
 # --- MENÜ ---
 def main_menu():
