@@ -119,22 +119,137 @@ def clear_history(chat_id):
     db_islem("DELETE FROM chat_history WHERE chat_id = %s", (chat_id,))
 
 # --- TEKNİK ANALİZ ---
-def get_financial_report(symbol):
-    if "/" not in symbol: symbol += "/USDT"
-    report = f"--- 💼 {symbol} TEKNİK RAPOR ---\n"
+# --- GELİŞMİŞ TEKNİK ANALİZ (DENİZ KUVVETLERİ) ⚓ ---
+def calculate_indicators(df):
+    """Verilen DataFrame için indikatörleri hesaplar."""
     try:
-        bars = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=30)
-        df = pd.DataFrame(bars, columns=['time', 'o', 'h', 'l', 'c', 'v'])
+        # Fiyat ve Hacim
+        close = df['c']
+        volume = df['v']
         
-        delta = df['c'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rsi = 100 - (100 / (1 + gain/loss))
-        
-        report += f"💰 Fiyat: {df['c'].iloc[-1]}\n"
-        report += f"📈 RSI (4H): {rsi.iloc[-1]:.1f}\n"
-    except: pass
+        # 1. RSI (12 Periyot - Paşa'nın İsteği)
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(12).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(12).mean()
+        df['rsi'] = 100 - (100 / (1 + gain/loss))
+
+        # 2. EMA (50 ve 200) - Trend Yönü
+        df['ema_50'] = close.ewm(span=50, adjust=False).mean()
+        df['ema_200'] = close.ewm(span=200, adjust=False).mean()
+
+        # 3. MACD (12, 26, 9)
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+
+        # 4. Bollinger Bantları (20, 2)
+        sma20 = close.rolling(window=20).mean()
+        std20 = close.rolling(window=20).std()
+        df['bb_upper'] = sma20 + (std20 * 2)
+        df['bb_lower'] = sma20 - (std20 * 2)
+
+        # 5. OBV (On-Balance Volume) - BALİNA DEDEKTÖRÜ 🐳
+        # Hacmin fiyata etkisini ölçer. Yükseliş hacimli mi, sahte mi?
+        df['obv'] = (np.sign(close.diff()) * volume).fillna(0).cumsum()
+
+        return df
+    except Exception as e:
+        print(f"İndikatör Hatası: {e}")
+        return df
+
+def get_deep_financial_report(symbol):
+    """15dk, 1s, 4s ve 1g periyotlarında DERİN ANALİZ yapar."""
+    if "/" not in symbol: symbol += "/USDT"
+    symbol = symbol.upper()
+    
+    report = f"--- ⚓ {symbol} DENİZ KUVVETLERİ RAPORU ⚓ ---\n"
+    report += f"⏰ Rapor Zamanı: {datetime.now().strftime('%H:%M')}\n\n"
+    
+    timeframes = ['15m', '1h', '4h', '1d']
+    
+    try:
+        # Önce sembol var mı kontrol et (Hata almamak için)
+        exchange.load_markets()
+        if symbol not in exchange.markets:
+            return f"⚠️ UYARI: {symbol} Binance Spot piyasasında bulunamadı. Sadece grafik/Google ile analiz edebilirim."
+
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = ticker['last']
+        report += f"💰 ANLIK FİYAT: ${current_price}\n"
+        report += f"📊 24s Değişim: %{ticker['percentage']:.2f}\n"
+        report += f"💧 24s Hacim (USDT): ${ticker['quoteVolume']:,.0f}\n\n"
+
+        for tf in timeframes:
+            bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100) # Son 100 mum
+            df = pd.DataFrame(bars, columns=['time', 'o', 'h', 'l', 'c', 'v'])
+            df = calculate_indicators(df)
+            
+            last = df.iloc[-1]
+            prev = df.iloc[-2] # Bir önceki mum (kırılım teyidi için)
+            
+            # Trend Yorumu (Basit Lojik)
+            trend = "YÜKSELİŞ 🟢" if last['ema_50'] > last['ema_200'] else "DÜŞÜŞ 🔴"
+            
+            # Verileri Rapora Ekle
+            report += f"🔻 --- [{tf} PERİYOT] ---\n"
+            report += f"   • RSI (12): {last['rsi']:.2f}\n"
+            report += f"   • MACD: {last['macd']:.4f} (Sinyal: {last['macd_signal']:.4f})\n"
+            report += f"   • Bollinger: Alt[{last['bb_lower']:.2f}] - Üst[{last['bb_upper']:.2f}]\n"
+            report += f"   • Trend (EMA50/200): {trend}\n"
+            
+            # OBV Yorumu (Hacim Artışı Var mı?)
+            obv_degisim = last['obv'] - df.iloc[-5]['obv'] # Son 5 mumdaki OBV değişimi
+            obv_yorum = "Balina Girişi Var 🐳" if obv_degisim > 0 else "Hacim Zayıf/Çıkış Var ⚠️"
+            report += f"   • Hacim Analizi (OBV): {obv_yorum}\n\n"
+
+    except Exception as e:
+        report += f"⚠️ Veri Çekme Hatası: {e}\n(Bu coin Binance'de listeli olmayabilir veya API hatası.)"
+    
     return report
+
+# --- GÜNCELLENMİŞ MESAJ YAKALAYICI (HER COİNİ TANIR) ---
+@bot.message_handler(content_types=['photo', 'text'])
+def handle_all(message):
+    chat_id = message.chat.id
+    user_input = message.caption if message.caption else (message.text if message.text else "")
+    
+    image_data = None
+    mime_type = None
+    system_instruction = "" # Yapay zekaya gidecek teknik veri
+
+    # 1. Metin Analizi: Kullanıcı "X analiz" dedi mi?
+    # Örnek: "SOL analiz", "Pepe ne olur?", "Analiz btc"
+    if user_input and len(user_input) < 20: # Kısa mesajsa coin ismi olabilir
+        words = user_input.split()
+        potential_coin = words[0].upper() # İlk kelimeyi coin varsayalım
+        
+        # Eğer kelime 2-6 harf arasındaysa ve rakam içermiyorsa analiz deneyelim
+        if 2 <= len(potential_coin) <= 6 and potential_coin.isalpha():
+             bot.send_chat_action(chat_id, 'typing')
+             system_instruction = get_deep_financial_report(potential_coin)
+             if "bulunamadı" not in system_instruction:
+                 bot.reply_to(message, f"⚓ {potential_coin} için Donanma Verileri Çekildi! Analiz Başlıyor...")
+
+    # 2. Fotoğraf Varsa
+    if message.photo:
+        bot.send_chat_action(chat_id, 'typing')
+        try:
+            file_info = bot.get_file(message.photo[-1].file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            image_data = downloaded_file
+            mime_type = "image/jpeg"
+        except Exception as e:
+            bot.reply_to(message, f"Resim hatası: {e}")
+            return
+
+    # Eğer sadece sohbetse ve coin yoksa boş geç
+    if not user_input and not image_data: return 
+
+    # 3. GEMINI'YE GÖNDER (Veri + Resim + Metin)
+    cevap = ask_gemini_unified(chat_id, user_input, image_data=image_data, mime_type=mime_type, system_instruction=system_instruction)
+    bot.send_message(chat_id, cevap)
+    
 
 # --- YAPAY ZEKA BEYNİ (FOTOĞRAF + SEARCH + THINKING + KALICI HAFIZA) ---
 def ask_gemini_unified(chat_id, user_input, image_data=None, mime_type=None, system_instruction=None):
